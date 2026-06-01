@@ -1,18 +1,18 @@
 
 The VOT Evaluation Toolkit
 ==========================
+An improved, extended fork of the official evaluation toolkit for the [Visual Object Tracking (VOT) challenge](http://votchallenge.net/), adding type annotations, video export and Python 3.10+ support, plus assorted bug fixes.
 
-[![Documentation Status](https://readthedocs.org/projects/vot-toolkit/badge/?version=latest)](https://vot-toolkit.readthedocs.io/en/latest/?badge=latest)
-[![PyPI package version](https://badge.fury.io/py/vot-toolkit.svg)](https://badge.fury.io/py/vot-toolkit)
+> **Unofficial fork.** This is *not* the official VOT toolkit and is not affiliated with or endorsed by the VOT initiative. It is a personal fork of [votchallenge/toolkit](https://github.com/votchallenge/toolkit), distributed under the same GPL-3.0 license. For the official, upstream toolkit, use [votchallenge/toolkit](https://github.com/votchallenge/toolkit).
 
-This repository contains the official evaluation toolkit for the [Visual Object Tracking (VOT) challenge](http://votchallenge.net/). This is the official version of the toolkit, implemented in Python 3 language. If you are looking for the old Matlab version, you can find an archived repository [here](https://github.com/votchallenge/toolkit-legacy).
+If you are looking for the old Matlab version, you can find an archived repository [here](https://github.com/votchallenge/toolkit-legacy).
 
-For more detailed informations consult the documentation available [here](http://vot-toolkit.readthedocs.io/). You can also subscribe to the VOT [mailing list](https://liste.arnes.si/mailman3/lists/votchallenge.lists.arnes.si/) to receive news about challenges and important software updates or join our [support form](https://groups.google.com/forum/?hl=en#!forum/votchallenge-help) to ask questions.
+Usage largely follows the upstream toolkit; consult its [documentation](http://vot-toolkit.readthedocs.io/), noting that it describes the official project and may not reflect this fork's changes. Please report issues with this fork on its own issue tracker rather than the VOT initiative's channels.
 
 Developers
 ----------
 
-The VOT toolkit is developed and maintained by [Luka Čehovin Zajc](https://vicos.si/lukacu) with the help of the VOT innitiative members and the VOT community.
+The original VOT toolkit is developed and maintained by [Luka Čehovin Zajc](https://vicos.si/lukacu) with the help of the VOT initiative members and the VOT community. This fork is maintained independently and is not affiliated with the VOT initiative.
 
 Community contributors:
 
