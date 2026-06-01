@@ -14,7 +14,19 @@ from ..experiment import Experiment
 from ..dataset import Sequence
 from ..tracker import Tracker, Results
 
-from attributee import Attributee, Boolean
+CacheKey = str | tuple[typing.Any, ...]
+
+
+def _storage_path_segment(value: typing.Any) -> str | None:
+    """Convert internal cache/directory keys to storage path segments."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):
+        return str(value)
+    return class_fullname(value)
+
 
 class Storage(ABC):
     """Abstract superclass for workspace storage abstraction."""
@@ -34,17 +46,17 @@ class Storage(ABC):
         pass
 
     @abstractmethod
-    def documents(self) -> typing.List[str]:
+    def documents(self) -> list[str]:
         """Lists documents in the storage."""
         pass
 
     @abstractmethod
-    def folders(self) -> typing.List[str]:
+    def folders(self) -> list[str]:
         """Lists folders in the storage."""
         pass
 
     @abstractmethod
-    def write(self, name:str, binary: bool = False):
+    def write(self, name: str, binary: bool = False) -> typing.IO:
         """Opens the given file entry for writing, returns opened handle.
 
         :param name: File name.
@@ -55,7 +67,7 @@ class Storage(ABC):
         pass
 
     @abstractmethod
-    def read(self, name, binary=False):
+    def read(self, name: str, binary: bool = False) -> typing.IO | None:
         """Opens the given file entry for reading, returns opened handle.
 
         :param name: File name.
@@ -76,7 +88,7 @@ class Storage(ABC):
         :rtype: bool"""
 
     @abstractmethod
-    def isfolder(self, name) -> bool:
+    def isfolder(self, name: str) -> bool:
         """Checks if given name is a folder in this storage.
 
         :param name: Name of the entry to check
@@ -86,7 +98,7 @@ class Storage(ABC):
         :rtype: bool"""
 
     @abstractmethod
-    def delete(self, name) -> bool:
+    def delete(self, name: str) -> bool:
         """Deletes a given document.
 
         :param name: File name.
@@ -107,7 +119,7 @@ class Storage(ABC):
         :rtype: Storage"""
 
     @abstractmethod
-    def copy(self, localfile: str, destination: str):
+    def copy(self, localfile: str, destination: str) -> None:
         """Copy a document to another location.
 
         :param localfile: Original location
@@ -116,10 +128,28 @@ class Storage(ABC):
         :type destination: str
         """
 
+
+class FilesystemStorage(Storage):
+    """Storage that can expose local filesystem directories.
+
+    The base Storage contract only deals with documents and folders. Some parts of
+    the toolkit need an actual local directory path for APIs that do not speak the
+    Storage abstraction, so that capability is modeled separately.
+    """
+
+    @abstractmethod
+    def substorage(self, name: str) -> "FilesystemStorage":
+        """Returns a filesystem-backed substorage."""
+
+    @abstractmethod
+    def directory(self, *args: typing.Any) -> str:
+        """Returns a local filesystem directory path in this storage."""
+
+
 class NullStorage(Storage):
     """An implementation of dummy storage that does not save anything."""
 
-    def results(self, tracker: Tracker, experiment: Experiment, sequence: Sequence):
+    def results(self, tracker: Tracker, experiment: Experiment, sequence: Sequence) -> Results:
         """Returns results object for the given tracker, experiment, sequence
         combination."""
         return Results(self)
@@ -128,70 +158,71 @@ class NullStorage(Storage):
         """Returns a string representation of the storage object."""
         return "<Null storage>"
 
-    def write(self, name, binary=False):
+    def write(self, name: str, binary: bool = False) -> typing.IO:
         """Opens the given file entry for writing, returns opened handle."""
         if binary:
             return open(os.devnull, "wb")
         else:
             return open(os.devnull, "w", encoding="utf-8")
 
-    def documents(self):
+    def documents(self) -> list[str]:
         """Lists documents in the storage."""
         return []
 
-    def folders(self):
+    def folders(self) -> list[str]:
         """Lists folders in the storage. Reuturns an empty list.
 
         :returns: Empty list
         :rtype: list"""
         return []
 
-    def read(self, name, binary=False):
+    def read(self, name: str, binary: bool = False) -> typing.IO | None:
         """Opens the given file entry for reading, returns opened handle.
 
         :returns: Returns None.
         :rtype: None"""
         return None
 
-    def isdocument(self, name):
+    def isdocument(self, name: str) -> bool:
         """Checks if given name is a document/file in this storage.
 
         :returns: Returns False.
         :rtype: bool"""
         return False
 
-    def isfolder(self, name):
+    def isfolder(self, name: str) -> bool:
         """Checks if given name is a folder in this storage.
 
         :returns: Returns False.
         :rtype: bool"""
         return False
 
-    def delete(self, name) -> bool:
+    def delete(self, name: str) -> bool:
         """Deletes a given document.
 
         :returns: Returns False since nothing is deleted.
         :rtype: bool"""
         return False
 
-    def substorage(self, name):
+    def substorage(self, name: str) -> "Storage":
         """Returns a substorage, storage object with root in a subfolder."""
         return NullStorage()
 
-    def copy(self, localfile, destination):
+    def copy(self, localfile: str, destination: str) -> None:
         """Copy a document to another location.
 
         Does nothing.
         """
         return
 
-class LocalStorage(Storage):
+
+class LocalStorage(FilesystemStorage):
     """Storage backed by the local filesystem.
 
     This is the default real storage implementation.
     """
 
-    def __init__(self, root: str):
+    def __init__(self, root: str) -> None:
         """Creates a new local storage object.
 
         :param root: Root path of the storage.
@@ -209,7 +240,7 @@ class LocalStorage(Storage):
         """Returns the base path of the storage."""
         return self._root
 
-    def results(self, tracker: Tracker, experiment: Experiment, sequence: Sequence):
+    def results(self, tracker: Tracker, experiment: Experiment, sequence: Sequence) -> Results:
         """Returns results object for the given tracker, experiment, sequence
         combination.
 
@@ -225,21 +256,25 @@ class LocalStorage(Storage):
         storage = LocalStorage(os.path.join(self._results, tracker.reference, experiment.identifier, sequence.name))
         return Results(storage)
 
-    def documents(self):
+    def documents(self) -> list[str]:
         """Lists documents in the storage.
 
         :returns: List of document names.
         :rtype: list"""
+        if not os.path.isdir(self._root):
+            return []
         return [name for name in os.listdir(self._root) if os.path.isfile(os.path.join(self._root, name))]
 
-    def folders(self):
+    def folders(self) -> list[str]:
         """Lists folders in the storage.
 
         :returns: List of folder names.
         :rtype: list"""
+        if not os.path.isdir(self._root):
+            return []
         return [name for name in os.listdir(self._root) if os.path.isdir(os.path.join(self._root, name))]
 
-    def write(self, name: str, binary: bool = False):
+    def write(self, name: str, binary: bool = False) -> typing.IO:
         """Opens the given file entry for writing, returns opened handle.
 
         :param name: File name.
@@ -257,7 +292,7 @@ class LocalStorage(Storage):
         else:
             return open(full, mode="w", newline="", encoding="utf-8")
 
-    def read(self, name, binary=False):
+    def read(self, name: str, binary: bool = False) -> typing.IO | None:
         """Opens the given file entry for reading, returns opened handle.
 
         :param name: File name.
@@ -274,7 +309,7 @@ class LocalStorage(Storage):
         else:
             return open(full, mode="r", newline="")
 
-    def delete(self, name) -> bool:
+    def delete(self, name: str) -> bool:
         """Deletes a given document. Returns True if successful, False otherwise.
 
         :param name: File name.
@@ -288,7 +323,7 @@ class LocalStorage(Storage):
             return True
         return False
 
-    def isdocument(self, name):
+    def isdocument(self, name: str) -> bool:
         """Checks if given name is a document/file in this storage.
 
         :param name: Name of the entry to check
@@ -298,7 +333,7 @@ class LocalStorage(Storage):
         :rtype: bool"""
         return os.path.isfile(os.path.join(self._root, name))
 
-    def isfolder(self, name):
+    def isfolder(self, name: str) -> bool:
         """Checks if given name is a folder in this storage.
 
         :param name: Name of the entry to check
@@ -308,7 +343,7 @@ class LocalStorage(Storage):
         :rtype: bool"""
         return os.path.isdir(os.path.join(self._root, name))
 
-    def substorage(self, name):
+    def substorage(self, name: str) -> "LocalStorage":
         """Returns a substorage, storage object with root in a subfolder.
 
         :param name: Name of the entry, must be a folder
@@ -318,7 +353,7 @@ class LocalStorage(Storage):
         :rtype: Storage"""
         return LocalStorage(os.path.join(self.base, name))
 
-    def copy(self, localfile, destination):
+    def copy(self, localfile: str, destination: str) -> None:
         """Copy a document to another location in the storage.
 
         :param localfile: Original location
@@ -334,9 +369,9 @@ class LocalStorage(Storage):
         full = os.path.join(self.base, destination)
         os.makedirs(os.path.dirname(full), exist_ok=True)
 
-        shutil.move(localfile, os.path.join(self.base, full))
+        shutil.copyfile(localfile, full)
 
-    def directory(self, *args):
+    def directory(self, *args: typing.Any) -> str:
         """Returns a path to a directory in the storage.
 
         :param *args: Path segments.
@@ -344,27 +379,20 @@ class LocalStorage(Storage):
         :returns: Path to the directory.
         :rtype: str
         :raises ValueError: If the path is not a directory."""
-        segments = []
-        for arg in args:
-            if arg is None:
-                continue
-            if isinstance(arg, str):
-                segments.append(arg)
-            elif isinstance(arg, (int, float)):
-                segments.append(str(arg))
-            else:
-                segments.append(class_fullname(arg))
+        segments = [_storage_path_segment(arg) for arg in args]
+        segments = [segment for segment in segments if segment is not None]
 
         path = os.path.join(self._root, *segments)
         os.makedirs(path, exist_ok=True)
 
         return path
 
+
 class Cache(cachetools.Cache):
     """Persistent cache, extends the cache from cachetools package by storing cached
     objects (using picke serialization) to the underlying storage."""
 
-    def __init__(self, storage: Storage):
+    def __init__(self, storage: Storage) -> None:
         """Creates a new cache backed by the given storage.
 
         :param storage: The storage used to save objects.
@@ -373,26 +401,26 @@ class Cache(cachetools.Cache):
         super().__init__(10000)
         self._storage = storage
 
-    def _filename(self, key: typing.Union[typing.Tuple, str]) -> str:
+    def _filename(self, key: CacheKey) -> str:
         """Generates a filename for the given object key.
 
         :param key: Cache key, either tuple or a single string
-        :type key: typing.Union[typing.Tuple, str]
+        :type key: tuple | str
 
         :returns: Relative path as a string
         :rtype: str"""
         if isinstance(key, tuple):
-            filename = key[-1]
-            if len(key) > 1:
-                directory = self._storage.directory(*key[:-1])
-            else:
-                directory = ""
+            segments = [_storage_path_segment(item) for item in key]
         else:
-            filename = str(key)
-            directory = ""
-        return os.path.join(directory, filename)
+            segments = [_storage_path_segment(key)]
 
-    def __getitem__(self, key: str) -> typing.Any:
+        segments = [segment for segment in segments if segment is not None]
+        if not segments:
+            raise ValueError("Cache key must contain at least one path segment")
+
+        return os.path.join(*segments)
+
+    def __getitem__(self, key: CacheKey) -> typing.Any:
         """Retrieves an image from cache. If it does not exist, a KeyError is raised.
 
         :param key: Key of the item
@@ -409,16 +437,19 @@ class Cache(cachetools.Cache):
             if not self._storage.isdocument(filename):
                 raise e
             try:
-                with self._storage.read(filename, binary=True) as filehandle:
+                filehandle = self._storage.read(filename, binary=True)
+                if filehandle is None:
+                    raise KeyError(filename)
+                with filehandle:
                     data = pickle.load(filehandle)
                     super().__setitem__(key, data)
                     return data
-            except pickle.PickleError as pe:
+            except (pickle.PickleError, EOFError, AttributeError, ImportError, ValueError) as pe:
                 raise KeyError(pe) from e
             except IOError as ie:
                 raise KeyError(ie) from e
 
-    def __setitem__(self, key: str, value: typing.Any) -> None:
+    def __setitem__(self, key: CacheKey, value: typing.Any) -> None:
         """Sets an item for given key.
 
         :param key: Item key
@@ -428,36 +459,39 @@ class Cache(cachetools.Cache):
         """
         super().__setitem__(key, value)
 
-        filename = self._filename(key)
         try:
+            payload = pickle.dumps(value)
+            filename = self._filename(key)
             with self._storage.write(filename, binary=True) as filehandle:
-                pickle.dump(value, filehandle)
-        except pickle.PickleError:
+                filehandle.write(payload)
+        except (pickle.PickleError, TypeError):
             pass
 
-    def __delitem__(self, key: str) -> None:
+    def __delitem__(self, key: CacheKey) -> None:
         """Operator for item deletion.
 
         :param key: Key of object to remove
         :type key: str
         """
-        try:
+        filename = self._filename(key)
+
+        if super().__contains__(key):
             super().__delitem__(key)
-            filename = self._filename(key)
-            try:
-                self._storage.delete(filename)
-            except IOError:
-                pass
-        except KeyError:
+
+        try:
+            self._storage.delete(filename)
+        except IOError:
             pass
 
-    def __contains__(self, key: str) -> bool:
+    def __contains__(self, key: object) -> bool:
         """Magic method, does the cache include an item for a given key.
 
         :param key: Item key
-        :type key: str
+        :type key: CacheKey
 
         :returns: True if object exists for a given key
         :rtype: bool"""
+        if not isinstance(key, (str, tuple)):
+            return False
         filename = self._filename(key)
-        return self._storage.isdocument(filename)
+        return super().__contains__(key) or self._storage.isdocument(filename)

@@ -6,6 +6,7 @@
 
     "failures": "vot.analysis.failures.FailureCount",
     "cumulative_failures": "vot.analysis.failures.CumulativeFailureCount",
+    "failure_curves": "vot.analysis.failures.SequenceFailureCurve",
 
     "pr_curves": "vot.analysis.longterm.PrecisionRecallCurves",
     "pr_curve": "vot.analysis.longterm.PrecisionRecallCurve",
@@ -30,5 +31,8 @@
     "point_accuracy": "vot.analysis.point.PointAccuracy",
     "point_average_accuracy": "vot.analysis.point.AveragePointAccuracy",
     "referral_accuracy": "vot.analysis.referral.ReferralSequenceAccuracy",
-    "referral_average_accuracy": "vot.analysis.referral.ReferralAverageAccuracy"
+    "referral_average_accuracy": "vot.analysis.referral.ReferralAverageAccuracy",
+
+    "sequence_speed": "vot.analysis.speed.SequenceSpeed",
+    "average_speed": "vot.analysis.speed.AverageSpeed"
 }

@@ -5,13 +5,13 @@ It also provides a set of utility functions for downloading and extracting datas
 
 import os
 
-from numbers import Number
 from collections import namedtuple
 from abc import abstractmethod, ABC
-from typing import List, Mapping, Optional, Set, Tuple, Iterator
+from typing import Mapping, Iterator, Callable, overload
 
 from PIL.Image import Image
 import numpy as np
+import numpy.typing as npt
 
 from cachetools import cached, LRUCache
 
@@ -29,7 +29,7 @@ class Channel(ABC):
     """Abstract representation of individual image channel, a sequence of images with
     uniform dimensions."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Base constructor for channel."""
         pass
 
@@ -41,7 +41,7 @@ class Channel(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def frame(self, index: int) -> "Frame":
+    def frame(self, index: int) -> npt.NDArray | None:
         """Returns frame object for the given index.
 
         :param index: Index of the frame
@@ -64,9 +64,18 @@ class Channel(ABC):
 
     @property
     @abstractmethod
-    def size(self) -> int:
-        """Returns the size of the channel in bytes."""
+    def size(self) -> tuple:
+        """Returns the size of the frames in the channel as a tuple (width, height)."""
         pass
+
+    @property
+    def disk_layout(self) -> tuple[str, str] | None:
+        """Returns the ``(base_directory, filename_pattern)`` of the channel's on-disk
+        frames, or ``None`` if the channel is not backed by files.
+
+        Proxy channels delegate to the channel they wrap so the original layout survives
+        transformations such as reversing or slicing."""
+        return None
 
 class Frame(object):
     """Frame object represents a single frame in the sequence.
@@ -75,7 +84,7 @@ class Frame(object):
     around the sequence object.
     """
 
-    def __init__(self, sequence, index):
+    def __init__(self, sequence: "Sequence", index: int) -> None:
         """Base constructor for frame object.
 
         :param sequence: Sequence object
@@ -104,29 +113,29 @@ class Frame(object):
         :rtype: Sequence"""
         return self._sequence
 
-    def channels(self):
+    def channels(self) -> list[str]:
         """Returns the list of channels in the sequence.
 
         :returns: List of channels
-        :rtype: List[str]"""
+        :rtype: list[str]"""
         return self._sequence.channels()
 
-    def channel(self, channel: Optional[str] = None):
+    def channel(self, channel: str | None = None) -> Channel | None:
         """Returns the channel object for the given channel name.
 
         :param channel: Name of the channel. Defaults to None.
-        :type channel: Optional[str], optional
+        :type channel: str | None, optional
         """
         channelobj = self._sequence.channel(channel)
         if channelobj is None:
             return None
-        return channelobj.frame(self._index)
+        return channelobj
 
-    def filename(self, channel: Optional[str] = None):
+    def filename(self, channel: str | None = None) -> str | None:
         """Returns the filename for the given channel name and frame index.
 
         :param channel: Name of the channel. Defaults to None.
-        :type channel: Optional[str], optional
+        :type channel: str | None, optional
 
         :returns: Filename of the frame
         :rtype: str"""
@@ -135,54 +144,45 @@ class Frame(object):
             return None
         return channelobj.filename(self._index)
 
-    def image(self, channel: Optional[str] = None) -> np.ndarray:
+    def image(self, channel: str | None = None) -> npt.NDArray | None:
         """Returns the image for the given channel name and frame index.
 
         :param channel: Name of the channel. Defaults to None.
-        :type channel: Optional[str], optional
+        :type channel: str | None, optional
 
         :returns: Image object
-        :rtype: np.ndarray"""
+        :rtype: npt.NDArray"""
         channelobj = self._sequence.channel(channel)
         if channelobj is None:
             return None
         return channelobj.frame(self._index)
 
-    def objects(self) -> List[str]:
+    def objects(self) -> list[str]:
         """Returns the list of objects in the frame.
 
         :returns: List of object ids
-        :rtype: List[str]"""
-        objects = {}
-        for o in self._sequence.objects():
-            region = self._sequence.object(o, self._index)
-            if region is not None:
-                objects[o] = region
-        return objects
+        :rtype: list[str]"""
+        return self._sequence.objects(self._index)
 
-    def object(self, id: str) -> Region:
-        """Returns the object region for the given object id and frame index.
+    def object(self, id: str) -> Region | None:
+        """Returns the object region for the given object id and frame index, or
+        ``None`` if the object is not visible in this frame.
 
         :param id: Id of the object
-        :type id: str
 
-        :returns: Object region
-        :rtype: Region"""
+        :returns: Object region or ``None``."""
         return self._sequence.object(id, self._index)
 
-    def groundtruth(self) -> Region:
-        """Returns the groundtruth region for the frame.
-
-        :returns: Groundtruth region
-        :rtype: Region
-        :raises DatasetException: If groundtruth is not available"""
+    def groundtruth(self) -> Region | None:
+        """Returns the groundtruth region for the frame, or ``None`` if no
+        groundtruth is available for this frame."""
         return self._sequence.groundtruth(self._index)
 
-    def tags(self) -> List[str]:
+    def tags(self) -> list[str]:
         """Returns the tags for the frame.
 
         :returns: List of tags
-        :rtype: List[str]"""
+        :rtype: list[str]"""
         return self._sequence.tags(self._index)
 
     def values(self) -> Mapping[str, float]:
@@ -193,29 +193,27 @@ class Frame(object):
         return self._sequence.values(self._index)
 
 class SequenceIterator(object):
-    """Sequence iterator provides an iterator interface for the sequence object."""
+    """Sequence iterator provides an iterator interface for a :class:`Sequence`.
 
-    def __init__(self, sequence: "Sequence"):
+    The iterator constructs :class:`Frame` objects on demand, and ``Frame`` requires
+    a :class:`Sequence` (rather than just a :class:`FrameList`) for its rich
+    metadata accessors (``object``, ``groundtruth``, ``tags``, ``values``, etc.).
+    """
+
+    def __init__(self, sequence: "Sequence") -> None:
         """Base constructor for sequence iterator.
 
         :param sequence: Sequence object
-        :type sequence: Sequence
         """
-        self._position = 0
+        self._position: int = 0
         self._sequence = sequence
 
-    def __iter__(self):
-        """Returns the iterator object.
-
-        :returns: Sequence iterator object
-        :rtype: SequenceIterator"""
+    def __iter__(self) -> "SequenceIterator":
+        """Returns the iterator object."""
         return self
 
     def __next__(self) -> Frame:
-        """Returns the next frame object in the sequence iterator.
-
-        :returns: Frame object
-        :rtype: Frame"""
+        """Returns the next frame object in the sequence iterator."""
         if self._position >= len(self._sequence):
             raise StopIteration()
         index = self._position
@@ -228,19 +226,19 @@ class InMemoryChannel(Channel):
     It is used to represent a sequence of images in memory.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Base constructor for in-memory channel."""
         super().__init__()
-        self._images = []
+        self._images: list[npt.NDArray] = []
         self._width = 0
         self._height = 0
         self._depth = 0
 
-    def append(self, image):
+    def append(self, image: npt.NDArray | Image) -> None:
         """Appends an image to the channel.
 
         :param image: Image object
-        :type image: np.ndarray
+        :type image: npt.NDArray | Image
         """
         if isinstance(image, Image):
             image = np.asarray(image)
@@ -272,7 +270,7 @@ class InMemoryChannel(Channel):
         :rtype: int"""
         return len(self._images)
 
-    def frame(self, index):
+    def frame(self, index: int) -> npt.NDArray | None:
         """Returns the frame object for the given index in the sequence channel.
 
         :param index: Index of the frame
@@ -286,14 +284,14 @@ class InMemoryChannel(Channel):
         return self._images[index]
 
     @property
-    def size(self):
+    def size(self) -> tuple[int, int]:
         """Returns the size of the channel in the format (width, height)
 
         :returns: Size of the channel
-        :rtype: Tuple[int, int]"""
+        :rtype: tuple[int, int]"""
         return self._width, self._height
 
-    def filename(self, index):
+    def filename(self, index: int) -> str:
         """Thwows an exception as the sequence is available in memory and not in
         files."""
         raise DatasetException("Sequence is available in memory, image files not available")
@@ -302,7 +300,7 @@ class PatternFileListChannel(Channel):
     """Sequence channel implementation where each frame is stored in a file and all file
     names follow a specific pattern."""
 
-    def __init__(self, path, start=1, step=1, end=None, check_files=True):
+    def __init__(self, path: str, start: int = 1, step: int = 1, end: int | None = None, check_files: bool = True) -> None:
         """Creates a new channel object.
 
         :param path: Path to the sequence
@@ -334,14 +332,19 @@ class PatternFileListChannel(Channel):
         return self._base
 
     @property
-    def pattern(self):
+    def pattern(self) -> str:
         """Returns the pattern of the sequence.
 
         :returns: Pattern
         :rtype: str"""
         return self._pattern
 
-    def __scan(self, pattern, start, step, end, check_files=True):
+    @property
+    def disk_layout(self) -> tuple[str, str]:
+        """Returns the ``(base_directory, filename_pattern)`` of the channel's frames."""
+        return self._base, self._pattern
+
+    def __scan(self, pattern: str, start: int, step: int, end: int | None, check_files: bool = True) -> None:
         """Scans the sequence directory for files matching the pattern and stores the
         file names in the internal list. The pattern must contain a single %d
         placeholder for the frame index. The placeholder must be at the end of the
@@ -390,13 +393,15 @@ class PatternFileListChannel(Channel):
 
         if os.path.isfile(self.filename(0)):
             im = cv2.imread(self.filename(0))
+
+            if im is None:
+                raise DatasetException("Failed to read image file {}".format(self.filename(0)))
+
             self._width = im.shape[1]
             self._height = im.shape[0]
             self._depth = im.shape[2]
         else:
-            self._depth = None
-            self._width = None
-            self._height = None
+            raise DatasetException("Failed to read image file {}".format(self.filename(0)))
 
     def __len__(self) -> int:
         """Returns the number of frames in the sequence.
@@ -405,7 +410,7 @@ class PatternFileListChannel(Channel):
         :rtype: int"""
         return len(self._files)
 
-    def frame(self, index: int) -> np.ndarray:
+    def frame(self, index: int) -> npt.NDArray | None:
         """Returns the frame at the specified index as a numpy array. The image is
         loaded using OpenCV and converted to RGB color space if necessary.
 
@@ -413,12 +418,14 @@ class PatternFileListChannel(Channel):
         :type index: int
 
         :returns: Frame
-        :rtype: np.ndarray
+        :rtype: npt.NDArray
         :raises DatasetException: If the index is out of bounds"""
         if index < 0 or index >= len(self):
             return None
 
         bgr = cv2.imread(self.filename(index))
+        if bgr is None:
+            raise DatasetException("Failed to read image file {}".format(self.filename(index)))
 
         # Check if the image is grayscale
         if len(bgr.shape) == 2:
@@ -450,7 +457,7 @@ class PatternFileListChannel(Channel):
         :rtype: int"""
         return self._height
 
-    def filename(self, index) -> str:
+    def filename(self, index: int) -> str:
         """Returns the filename of the frame at the specified index.
 
         :param index: Frame index
@@ -459,37 +466,31 @@ class PatternFileListChannel(Channel):
         :returns: Filename
         :rtype: str"""
         if index < 0 or index >= len(self):
-            return None
+            raise DatasetException("Frame index out of bounds")
 
         return os.path.join(self.base, self._files[index])
 
 class FrameList(object):
-    """Abstract base for all sequences, just a list of frame objects."""
+    """Abstract base for sequence-like containers — defines the structural
+    ``__len__`` / ``frame`` / ``__getitem__`` contract.
 
-    def __iter__(self):
-        """Returns an iterator over the frames in the sequence.
-
-        :returns: Iterator
-        :rtype: SequenceIterator"""
-        return SequenceIterator(self)
+    Iteration is provided by :class:`Sequence`, not here: the iterator constructs
+    :class:`Frame` objects which require :class:`Sequence`-level access (channels,
+    objects, groundtruth, ...). Plain ``FrameList`` instances would yield Frames
+    whose accessors would fail at runtime.
+    """
 
     def __len__(self) -> int:
-        """Returns the number of frames in the sequence.
-
-        :returns: Number of frames
-        :rtype: int"""
+        """Returns the number of frames in the sequence."""
         raise NotImplementedError()
 
     def frame(self, index: int) -> Frame:
-        """Returns the frame at the specified index.
-
-        :param index: Frame index
-        :type index: int
-        """
+        """Returns the frame at the specified index."""
         raise NotImplementedError()
-    
+
     def __getitem__(self, index: int) -> Frame:
         return self.frame(index)
+
 
 class Sequence(FrameList):
     """A sequence is a list of frames (multiple channels) and a list of one or more
@@ -499,10 +500,11 @@ class Sequence(FrameList):
     values.
     """
 
-    UNKNOWN = 0 # object state is unknown in this frame
-    INVISIBLE = 1 # object is not visible in this frame
+    def __iter__(self) -> SequenceIterator:
+        """Returns an iterator over the frames in the sequence."""
+        return SequenceIterator(self)
 
-    def __init__(self, name: str):
+    def __init__(self, name: str) -> None:
         """Creates a new sequence with the specified name."""
         self._name = name
 
@@ -525,7 +527,7 @@ class Sequence(FrameList):
         return self._name
 
     @abstractmethod
-    def metadata(self, name=None, default=None):
+    def metadata(self, name: str | None = None, default: object | None = None) -> object:
         """Returns the value of the specified metadata field. If the field does not
         exist, the default value is returned.
 
@@ -539,7 +541,7 @@ class Sequence(FrameList):
         raise NotImplementedError()
 
     @abstractmethod
-    def channel(self, channel=None) -> Channel:
+    def channel(self, channel: str | None = None) -> Channel | None:
         """Returns the channel with the specified name or the default channel if no name
         is specified.
 
@@ -548,10 +550,10 @@ class Sequence(FrameList):
 
         :returns: Channel
         :rtype: Channel"""
-        raise NotImplementedError()    
+        raise NotImplementedError()
 
     @abstractmethod
-    def channels(self) -> Set[str]:
+    def channels(self) -> list[str]:
         """Returns the names of all channels in the sequence.
 
         :returns: Names of all channels
@@ -559,15 +561,19 @@ class Sequence(FrameList):
         raise NotImplementedError()
 
     @abstractmethod
-    def objects(self) -> Set[str]:
+    def objects(self, index: int | None = None) -> list[str]:
         """Returns the names of all objects in the sequence.
 
         :returns: Names of all objects
         :rtype: set"""
         raise NotImplementedError()
 
+    @overload
+    def object(self, oid: str, index: None = None) -> list["Region"] | None: ...
+    @overload
+    def object(self, oid: str, index: int) -> Region | None: ...
     @abstractmethod
-    def object(self, oid, index=None):
+    def object(self, oid: str, index: int | None = None) -> Region | list["Region"] | None:
         """Returns the object with the specified name or identifier. If the index is
         specified, the object is returned only if it is visible in the frame at the
         specified index.
@@ -581,8 +587,12 @@ class Sequence(FrameList):
         :rtype: Region"""
         raise NotImplementedError()
 
+    @overload
+    def groundtruth(self, index: None = None) -> list[Region] | None: ...
+    @overload
+    def groundtruth(self, index: int) -> Region | None: ...
     @abstractmethod
-    def groundtruth(self, index: int) -> Region:
+    def groundtruth(self, index: int | None = None) -> Region | list[Region] | None:
         """Returns the ground truth region for the specified frame index or None if no
         ground truth is available for the frame or the frame index is out of bounds.
         This is a legacy method for compatibility with single-object datasets and should
@@ -596,7 +606,7 @@ class Sequence(FrameList):
         raise NotImplementedError()
 
     @abstractmethod
-    def tags(self, index=None) -> List[str]:
+    def tags(self, index: int | None = None) -> list[str]:
         """Returns the tags for the specified frame index or None if no tags are
         available for the frame or the frame index is out of bounds.
 
@@ -607,8 +617,12 @@ class Sequence(FrameList):
         :rtype: list"""
         raise NotImplementedError()
 
+    @overload
+    def values(self, index: None = None) -> list[str]: ...
+    @overload
+    def values(self, index: int) -> Mapping[str, float]: ...
     @abstractmethod
-    def values(self, index=None) -> Mapping[str, Number]:
+    def values(self, index: int | None = None) -> list[str] | Mapping[str, float]:
         """Returns the values for the specified frame index or None if no values are
         available for the frame or the frame index is out of bounds.
 
@@ -638,7 +652,7 @@ class Sequence(FrameList):
         raise NotImplementedError()
 
     @property
-    def size(self) -> Tuple[int, int]:
+    def size(self) -> tuple[int, int]:
         """Returns the size of the frames in the sequence in pixels as a tuple (width,
         height)
 
@@ -646,7 +660,7 @@ class Sequence(FrameList):
         :rtype: tuple"""
         return self.width, self.height
 
-    def describe(self):
+    def describe(self) -> dict:
         """Returns a dictionary with information about the sequence.
 
         :returns: Dictionary with information
@@ -699,18 +713,18 @@ class Dataset(object):
         :rtype: DatasetIterator"""
         return iter(self._sequences.values())
 
-    def list(self) -> List[str]:
+    def list(self) -> list[str]:
         """Returns a list of unique sequence names.
 
         :returns: List of sequence names
-        :rtype: List[str]"""
+        :rtype: list[str]"""
         return list(self._sequences.keys())
 
-    def keys(self) -> List[str]:
+    def keys(self) -> list[str]:
         """Returns a list of unique sequence names.
 
         :returns: List of sequence names
-        :rtype: List[str]"""
+        :rtype: list[str]"""
         return list(self._sequences.keys())
 
 SequenceData = namedtuple("SequenceData", ["channels", "objects", "tags", "values", "length"])
@@ -718,7 +732,7 @@ SequenceData = namedtuple("SequenceData", ["channels", "objects", "tags", "value
 from vot import config
 
 @cached(LRUCache(maxsize=config.sequence_cache_size))
-def _cached_loader(sequence):
+def _cached_loader(sequence: "BasedSequence") -> SequenceData:
     """Loads the sequence data from the sequence object.
 
     This function serves as a cache for the sequence data and is only called if the
@@ -733,7 +747,7 @@ class BasedSequence(Sequence):
     The sequence data is loaded only when it is needed.
     """
 
-    def __init__(self, name: str, loader: callable, metadata: dict = None):
+    def __init__(self, name: str, loader: Callable[[dict], SequenceData], metadata: dict | None = None) -> None:
         """Initializes the sequence.
 
         :param name: Sequence name
@@ -748,7 +762,7 @@ class BasedSequence(Sequence):
         self._loader = loader
         self._metadata = metadata if metadata is not None else {}
 
-    def __preload(self):
+    def __preload(self) -> SequenceData:
         """Loads the sequence data if needed.
 
         This is an internal function that should not be called directly. It calles a
@@ -757,7 +771,7 @@ class BasedSequence(Sequence):
         """
         return _cached_loader(self)
 
-    def metadata(self, name: str=None, default=None):
+    def metadata(self, name: str | None = None, default: object | None = None) -> object:
         """Returns the metadata value with the specified name.
 
         :param name: Metadata name
@@ -771,15 +785,15 @@ class BasedSequence(Sequence):
             return self._metadata.copy()
         return self._metadata.get(name, default)
 
-    def channels(self) -> List[str]:
+    def channels(self) -> list[str]:
         """Returns a list of channel names in the sequence.
 
         :returns: List of channel names
-        :rtype: List[str]"""
+        :rtype: list[str]"""
         data = self.__preload()
         return data.channels.keys()
 
-    def channel(self, channel: str=None) -> Channel:
+    def channel(self, channel: str | None = None) -> Channel:
         """Returns the channel with the specified name. If the channel name is not
         specified, the default channel is returned.
 
@@ -790,10 +804,18 @@ class BasedSequence(Sequence):
         :rtype: Channel"""
         data = self.__preload()
         if channel is None:
-            channel = self.metadata("channel.default")
-        return data.channels.get(channel, None)
+            channel = self.metadata("channel.default")  # type: ignore
+        if channel is None:
+            raise DatasetException(
+                "Sequence '{}' has no default channel configured".format(self.name))
+        result = data.channels.get(channel, None)
+        if result is None:
+            raise DatasetException(
+                "Sequence '{}' has no channel '{}' (available: {})".format(
+                    self.name, channel, sorted(data.channels.keys())))
+        return result
 
-    def frame(self, index):
+    def frame(self, index: int) -> Frame:
         """Returns the frame with the specified index in the sequence as a Frame object.
 
         :param index: Frame index
@@ -803,15 +825,21 @@ class BasedSequence(Sequence):
         :rtype: Frame"""
         return Frame(self, index)
 
-    def objects(self) -> List[str]:
+    def objects(self, index: int | None = None) -> list[str]:
         """Returns a list of object ids in the sequence.
 
         :returns: List of object ids
-        :rtype: List[str]"""
+        :rtype: list[str]"""
         data = self.__preload()
-        return data.objects.keys()
+        if index is None:
+            return list(data.objects.keys())
+        return [o for o, states in data.objects.items() if states[index] is not None]
 
-    def object(self, oid, index=None) -> Region:
+    @overload
+    def object(self, oid: str, index: None = None) -> list[Region] | None: ...
+    @overload
+    def object(self, oid: str, index: int) -> Region | None: ...
+    def object(self, oid: str, index: int | None = None) -> Region | list[Region] | None:
         """Returns the object with the specified id. If the index is specified, the
         object is returned as a Region object.
 
@@ -830,7 +858,11 @@ class BasedSequence(Sequence):
             return None
         return obj[index]
 
-    def groundtruth(self, index=None):
+    @overload
+    def groundtruth(self, index: None = None) -> list[Region] | None: ...
+    @overload
+    def groundtruth(self, index: int) -> Region | None: ...
+    def groundtruth(self, index: int | None = None) -> Region | list[Region] | None:
         """Returns the groundtruth object. If the index is specified, the object is
         returned as a Region object. If the sequence contains more than one object, an
         exception is raised. If more objects are present, this method ignores special
@@ -842,7 +874,7 @@ class BasedSequence(Sequence):
         :returns: Groundtruth region
         :rtype: Region"""
         objids = self.objects()
-   
+
         if len(objids) != 1:
             # Filter special objects first
             objids = [o for o in objids if not o.startswith("_")]
@@ -852,7 +884,7 @@ class BasedSequence(Sequence):
         oid = next(iter(objids))
         return self.object(oid, index)
 
-    def tags(self, index: int = None) -> List[str]:
+    def tags(self, index: int | None = None) -> list[str]:
         """Returns a list of tags in the sequence. If the index is specified, only the
         tags that are present in the frame with the specified index are returned.
 
@@ -860,13 +892,17 @@ class BasedSequence(Sequence):
         :type index: int, optional
 
         :returns: List of tags
-        :rtype: List[str]"""
+        :rtype: list[str]"""
         data = self.__preload()
         if index is None:
-            return data.tags.keys()
+            return list(data.tags.keys())
         return [t for t, sq in data.tags.items() if sq[index]]
 
-    def values(self, index: int = None) -> List[float]:
+    @overload
+    def values(self, index: None = None) -> list[str]: ...
+    @overload
+    def values(self, index: int) -> Mapping[str, float]: ...
+    def values(self, index: int | None = None) -> list[str] | Mapping[str, float]:
         """Returns a list of values in the sequence. If the index is specified, only the
         values that are present in the frame with the specified index are returned.
 
@@ -874,14 +910,14 @@ class BasedSequence(Sequence):
         :type index: int, optional
 
         :returns: List of values
-        :rtype: List[float]"""
+        :rtype: list[float]"""
         data = self.__preload()
         if index is None:
-            return data.values.keys()
+            return list(data.values.keys())
         return {v: sq[index] for v, sq in data.values.items()}
 
     @property
-    def size(self):
+    def size(self) -> tuple:
         """Returns the sequence size as a tuple (width, height)
 
         :returns: Sequence size
@@ -889,16 +925,24 @@ class BasedSequence(Sequence):
         return self.width, self.height
 
     @property
-    def width(self):
+    def width(self) -> int:
         """Returns the sequence width."""
-        return self._metadata["width"]
+        self.__preload()  # ``width``/``height`` are populated into the metadata by the loader.
+        width = self._metadata.get("width")
+        if width is None:
+            raise DatasetException("Sequence '{}' has no width metadata".format(self.name))
+        return width
 
     @property
-    def height(self):
+    def height(self) -> int:
         """Returns the sequence height."""
-        return self._metadata["height"]
+        self.__preload()  # ``width``/``height`` are populated into the metadata by the loader.
+        height = self._metadata.get("height")
+        if height is None:
+            raise DatasetException("Sequence '{}' has no height metadata".format(self.name))
+        return height
 
-    def __len__(self):
+    def __len__(self) -> int:
         """Returns the sequence length in frames.
 
         :returns: Sequence length
@@ -913,7 +957,7 @@ class InMemorySequence(Sequence):
     Only single object sequences are supported at the moment.
     """
 
-    def __init__(self, name, channels):
+    def __init__(self, name: str, channels: list) -> None:
         """Creates a new in-memory sequence.
 
         :param name: Sequence name
@@ -923,12 +967,12 @@ class InMemorySequence(Sequence):
 
         :raises DatasetException: If images are not provided for all channels"""
         super().__init__(name)
-        self._channels = {c: InMemoryChannel() for c in channels}
-        self._tags = {}
-        self._values = {}
-        self._groundtruth = []
+        self._channels: dict = {c: InMemoryChannel() for c in channels}
+        self._tags: dict[str, list[bool]] = {}
+        self._values: dict[str, list[float]] = {}
+        self._groundtruth: list[Region] = []
 
-    def append(self, images: dict, region: "Region", tags: list = None, values: dict = None):
+    def append(self, images: dict, region: "Region", tags: set | None = None, values: dict | None = None) -> None:
         """Appends a new frame to the sequence. The frame is specified by a dictionary
         of images, a region and optional tags and values.
 
@@ -937,7 +981,7 @@ class InMemorySequence(Sequence):
         :param region: Region
         :type region: Region
         :param tags: List of tags
-        :type tags: list, optional
+        :type tags: set, optional
         :param values: Dictionary of values
         :type values: dict, optional
         """
@@ -970,7 +1014,7 @@ class InMemorySequence(Sequence):
 
         self._groundtruth.append(region)
 
-    def metadata(self, name=None, default=None):
+    def metadata(self, name: str | None = None, default: object | None = None) -> object:
         """Returns the value of the specified metadata field. If the field does not
         exist, the default value is returned.
 
@@ -985,7 +1029,7 @@ class InMemorySequence(Sequence):
             return dict(width=self.width, height=self.height)
         return default
 
-    def channel(self, channel : str) -> "Channel":
+    def channel(self, channel : str | None = None) -> Channel | None:
         """Returns the specified channel object.
 
         :param channel: Channel name
@@ -995,7 +1039,7 @@ class InMemorySequence(Sequence):
         :rtype: Channel"""
         return self._channels.get(channel, None)
 
-    
+
     def frame(self, index : int) -> "Frame":
         """Returns the specified frame. The frame is returned as a Frame object.
 
@@ -1005,8 +1049,12 @@ class InMemorySequence(Sequence):
         :returns: Frame object
         :rtype: Frame"""
         return Frame(self, index)
-    
-    def groundtruth(self, index: int = None) -> "Region":
+
+    @overload
+    def groundtruth(self, index: None = None) -> list[Region] | None: ...
+    @overload
+    def groundtruth(self, index: int) -> Region | None: ...
+    def groundtruth(self, index: int | None = None) -> Region | list[Region] | None:
         """Returns the groundtruth object. If the index is specified, the object is
         returned as a Region object. If the sequence contains more than one object, an
         exception is raised. If the index is not specified, the groundtruth object is
@@ -1022,7 +1070,11 @@ class InMemorySequence(Sequence):
             return self._groundtruth
         return self._groundtruth[index]
 
-    def object(self, oid: str, index: int = None) -> "Region":
+    @overload
+    def object(self, oid: str, index: None = None) -> list["Region"] | None: ...
+    @overload
+    def object(self, oid: str, index: int) -> Region | None: ...
+    def object(self, oid: str, index: int | None = None) -> Region | list["Region"] | None:
         """Returns the specified object. If the index is specified, the object is
         returned as a Region object. If the sequence contains more than one object, an
         exception is raised. If the index is not specified, the groundtruth object is
@@ -1043,7 +1095,7 @@ class InMemorySequence(Sequence):
             return self._groundtruth
         return self._groundtruth[index]
 
-    def objects(self, index: str = None) -> List[str]:
+    def objects(self, index: int | None = None) -> list[str]:
         """Returns a list of object ids. If the index is specified, only the objects
         that are present in the frame with the specified index are returned.
 
@@ -1054,7 +1106,7 @@ class InMemorySequence(Sequence):
         """
         return ["object"]
 
-    def tags(self, index=None):
+    def tags(self, index: int | None = None) -> list[str]:
         """Returns a list of tags in the sequence. If the index is specified, only the
         tags that are present in the frame with the specified index are returned.
 
@@ -1062,12 +1114,16 @@ class InMemorySequence(Sequence):
         :type index: int, optional
 
         :returns: List of tags
-        :rtype: List[str]"""
+        :rtype: list[str]"""
         if index is None:
-            return self._tags.keys()
+            return list(self._tags.keys())
         return [t for t, sq in self._tags.items() if sq[index]]
-    
-    def values(self, index=None):
+
+    @overload
+    def values(self, index: None = None) -> list[str]: ...
+    @overload
+    def values(self, index: int) -> Mapping[str, float]: ...
+    def values(self, index: int | None = None) -> list[str] | Mapping[str, float]:
         """Returns a list of values in the sequence. If the index is specified, only the
         values that are present in the frame with the specified index are returned.
 
@@ -1075,50 +1131,53 @@ class InMemorySequence(Sequence):
         :type index: int, optional
 
         :returns: List of values
-        :rtype: List[str]"""
+        :rtype: list[str]"""
         if index is None:
-            return self._values.keys()
+            return list(self._values.keys())
         return {v: sq[index] for v, sq in self._values.items()}
-    
-    def __len__(self):
+
+    def __len__(self) -> int:
         """Returns the sequence length in frames.
 
         :returns: Sequence length
         :rtype: int"""
         return len(self._groundtruth)
-    
+
     @property
     def width(self) -> int:
         """Returns the sequence width.
 
         :returns: Sequence width
         :rtype: int"""
-        return self.channel().width
-    
+        chan = self.channel()
+        return chan.size[0] if chan else 0
+
     @property
     def height(self) -> int:
         """Returns the sequence height.
 
         :returns: Sequence height
         :rtype: int"""
-        return self.channel().height
-    
+        chan = self.channel()
+        return chan.size[1] if chan else 0
+
     @property
     def size(self) -> tuple:
         """Returns the sequence size as a tuple (width, height)
 
         :returns: Sequence size
         :rtype: tuple"""
-        return self.channel().size
+        chan = self.channel()
+        return chan.size if chan else (0, 0)
 
-    def channels(self) -> List[str]:
+    def channels(self) -> list[str]:
         """Returns a list of channel names.
 
         :returns: List of channel names
-        :rtype: List[str]"""
-        return set(self._channels.keys())
+        :rtype: list[str]"""
+        return list(self._channels.keys())
 
-def download_bundle(url: str, path: str = "."):
+def download_bundle(url: str, path: str = ".") -> None:
     """Downloads a dataset bundle as a ZIP file and decompresses it.
 
     :param url: Source bundle URL
@@ -1145,7 +1204,7 @@ def download_bundle(url: str, path: str = "."):
 
 # Legacy reader is registered last, otherwise it will cause problems
 # TODO: implement explicit ordering of readers
-def read_legacy_sequence(path: str) -> Sequence:
+def read_legacy_sequence(path: str) -> Sequence | None:
     """Wrapper around the legacy sequence reader."""
     from vot.dataset.common import read_sequence_legacy
     return read_sequence_legacy(path)
@@ -1154,7 +1213,7 @@ dataset_downloader = Registry("downloader")
 sequence_indexer = Registry("indexer")
 sequence_reader = Registry("loader")
 
-def download_dataset(url: str, path: str):
+def download_dataset(url: str, path: str) -> None:
     """Downloads a dataset from a given url or an alias.
 
     :param url: URL to the data bundle or metadata description file
@@ -1197,7 +1256,7 @@ def load_dataset(path: str) -> Dataset:
     from vot import get_logger
 
     sequence_list = None
-    
+
     logger = get_logger()
 
     for _, indexer in sequence_indexer.items():
@@ -1205,7 +1264,7 @@ def load_dataset(path: str) -> Dataset:
         sequence_list = indexer(path)
         if sequence_list is not None:
             break
-        
+
     if sequence_list is None or len(sequence_list) == 0:
         raise DatasetException("Unable to locate sequences in {}".format(path))
 

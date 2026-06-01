@@ -19,7 +19,7 @@ def toolkit_version() -> str:
     :rtype: str"""
     return __version__
 
-def check_updates() -> bool:
+def check_updates() -> tuple[bool, str | None]:
     """Checks for toolkit updates on Github, requires internet access, fails silently on
     errors.
 
@@ -76,7 +76,7 @@ class GlobalConfiguration(Attributee):
     persistent_cache = Boolean(default=True, description="Enables persistent cache for analysis results in workspace.")
     registry = List(String(), default="", separator=os.pathsep, description="List of directories to search for tracker metadata.")
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initializes the global configuration object. It reads the configuration from
         environment variables.
 
@@ -89,7 +89,7 @@ class GlobalConfiguration(Attributee):
                 kwargs[k] = os.environ[envname]
         super().__init__(**kwargs)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         """Returns a string representation of the global configuration object."""
         return " ".join(["{}={}".format(k, getattr(self, k)) for k in self.attributes()])
 
@@ -104,7 +104,7 @@ def get_logger() -> logging.Logger:
     :returns: Logger handle
     :rtype: logging.Logger"""
 
-    def init():
+    def init() -> logging.Logger:
         from .utilities import ColoredFormatter
         logger = logging.getLogger("vot")
         stream = logging.StreamHandler()
@@ -116,7 +116,7 @@ def get_logger() -> logging.Logger:
 
     return Proxy(init)
 
-def log_debug(message: str, *args, **kwargs):
+def log_debug(message: str, *args, **kwargs) -> None:
     """Prints a debug message to the logger if debug mode is enabled.
 
     :param message: The message to be printed.
@@ -125,7 +125,7 @@ def log_debug(message: str, *args, **kwargs):
     :param kwargs: Additional keyword arguments to be formatted into the message."""
     get_logger().debug(message, *args, **kwargs)
 
-def log_info(message: str, *args, **kwargs):
+def log_info(message: str, *args, **kwargs) -> None:
     """Prints an info message to the logger.
 
     :param message: The message to be printed.
@@ -143,7 +143,7 @@ def check_debug() -> bool:
     :rtype: bool"""
     return config.debug_mode
 
-def print_config():
+def print_config() -> None:
     """Prints the global configuration object to the logger."""
     if check_debug():
         get_logger().debug("Configuration: %s", config)

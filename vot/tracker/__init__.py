@@ -1,12 +1,15 @@
 """This module contains the base classes for trackers and the registry of known
 trackers."""
 
+from __future__ import annotations
+
 import os
 import re
 import configparser
 import copy
+from types import TracebackType
 from numbers import Real
-from typing import Tuple, List, Union, Dict
+from typing import Iterable, Callable, Any, Self, TYPE_CHECKING
 from collections import OrderedDict
 from abc import abstractmethod, ABC
 
@@ -15,33 +18,31 @@ import yaml
 from vot import ToolkitException
 from vot.dataset import Frame
 from vot.utilities import to_string
-from vot.region import Region, Special
+from vot.region import Region, Special, SpecialCode
+
+if TYPE_CHECKING:
+    from vot.workspace.storage import Storage
 
 class TrackerException(ToolkitException):
     """Base class for all tracker related exceptions."""
 
-    def __init__(self, *args, tracker, tracker_log=None):
+    def __init__(self, *args: object, tracker: "Tracker", tracker_log: str | None = None) -> None:
         """Initialize the exception.
 
         :param tracker: Tracker that caused the exception.
-        :type tracker: Tracker
         :param tracker_log: Optional log message. Defaults to None.
-        :type tracker_log: str, optional
         """
         super().__init__(*args)
-        self._tracker_log = tracker_log
-        self._tracker = tracker
+        self._tracker_log: str | None = tracker_log
+        self._tracker: "Tracker" = tracker
 
     @property
-    def log(self) -> str:
-        """Returns the log message of the tracker.
-
-        :returns: Log message of the tracker.
-        :rtype: sts"""
+    def log(self) -> str | None:
+        """Returns the log message of the tracker, or ``None`` if none was captured."""
         return self._tracker_log
 
     @property
-    def tracker(self):
+    def tracker(self) -> "Tracker":
         """Returns the tracker that caused the exception."""
         return self._tracker
 
@@ -53,7 +54,7 @@ VALID_IDENTIFIER = re.compile("^[a-zA-Z0-9-_]+$")
 
 VALID_REFERENCE = re.compile("^([a-zA-Z0-9-_]+)(@[a-zA-Z0-9-_]*)?$")
 
-def is_valid_identifier(identifier):
+def is_valid_identifier(identifier: str) -> bool:
     """Checks if the identifier is valid.
 
     :param identifier: The identifier to check.
@@ -63,7 +64,7 @@ def is_valid_identifier(identifier):
     :rtype: bool"""
     return not VALID_IDENTIFIER.match(identifier) is None
 
-def is_valid_reference(reference):
+def is_valid_reference(reference: str) -> bool:
     """Checks if the reference is valid.
 
     :param reference: The reference to check.
@@ -73,7 +74,7 @@ def is_valid_reference(reference):
     :rtype: bool"""
     return not VALID_REFERENCE.match(reference) is None
 
-def parse_reference(reference):
+def parse_reference(reference: str) -> tuple[str | None, str | None]:
     """Parses the reference into identifier and version.
 
     :param reference: The reference to parse.
@@ -89,7 +90,7 @@ def parse_reference(reference):
 
 _runtime_protocols = {}
 
-def register_runtime_protocol(protocol, constructor):
+def register_runtime_protocol(protocol: str, constructor: Callable[..., "TrackerRuntime"]) -> None:
     """Registers a runtime protocol with the given constructor.
 
     :param protocol: The name of the protocol.
@@ -99,7 +100,7 @@ def register_runtime_protocol(protocol, constructor):
     """
     if protocol in _runtime_protocols:
         raise ValueError("Runtime protocol '{}' is already registered".format(protocol))
-    
+
     _runtime_protocols[protocol] = constructor
 
 class Registry(object):
@@ -108,20 +109,24 @@ class Registry(object):
     Trackers are loaded from a manifest files in one or more directories.
     """
 
-    def __init__(self, directories, root=os.getcwd()):
+    def __init__(self, directories: list[str], root: str | None = None) -> None:
         """Initialize the registry.
 
         :param directories: List of directories to scan for trackers.
         :type directories: list
-        :param root: The root directory of the workspace. Defaults to os.getcwd().
-        :type root: str, optional
+        :param root: The root directory of the workspace. Defaults to the current working directory.
+        :type root: str | None, optional
         """
+        if root is None:
+            root = os.getcwd()
+
         from vot import get_logger
-        
+
         logger = get_logger()
-        
+
         trackers = dict()
         registries = []
+        self._paths: list[str] = []
 
         for directory in directories:
             if not os.path.isabs(directory):
@@ -171,58 +176,63 @@ class Registry(object):
         self._trackers = OrderedDict(sorted(trackers.items(), key=lambda t: t[0]))
         logger.debug("Found %d trackers", len(self._trackers))
 
-    def __getitem__(self, reference) -> "Tracker":
+    def __getitem__(self, reference: str) -> "Tracker":
         """Returns the tracker for the given reference."""
 
         return self.resolve(reference, skip_unknown=False, resolve_plural=False)[0]
 
-    def __contains__(self, reference) -> bool:
+    def __contains__(self, reference: str) -> bool:
         """Checks if the tracker is registered."""
         identifier, _ = parse_reference(reference)
         return identifier in self._trackers
 
-    def __iter__(self):
+    def __iter__(self) -> Iterable["Tracker"]:
         """Returns an iterator over the trackers."""
         return iter(self._trackers.values())
 
-    def __len__(self):
+    def __len__(self) -> int:
         """Returns the number of trackers."""
         return len(self._trackers)
 
-    def resolve(self, *references, storage=None, skip_unknown=True, resolve_plural=True):
+    def resolve(
+        self,
+        *references: str,
+        storage: Storage | None = None,
+        skip_unknown: bool = True,
+        resolve_plural: bool = True,
+    ) -> list["Tracker"]:
         """Resolves the references to trackers.
 
-        :param storage: Storage to use for resolving references. Defaults to None.
-        :type storage: _type_, optional
-        :param skip_unknown: Skip unknown trackers. Defaults to True.
-        :type skip_unknown: bool, optional
-        :param resolve_plural: Resolve plural references. Defaults to True.
-        :type resolve_plural: bool, optional
+        :param storage: Storage to use for resolving references. ``None`` means
+            no per-version resolution.
+        :param skip_unknown: Skip unknown trackers.
+        :param resolve_plural: Resolve plural references.
 
         :raises ToolkitException: When a reference cannot be resolved.
-        :returns: Resolved trackers.
-        :rtype: list""" 
+        :returns: Resolved trackers."""
 
-        trackers = []
+        trackers: list["Tracker"] = []
 
         for reference in references:
-            
+
             if resolve_plural and reference.startswith("#"):
                 tag = reference[1:]
                 if not is_valid_identifier(tag):
                     continue
                 for tracker in self._trackers.values():
                     if tracker.tagged(tag):
-                        trackers.extend(self._find_versions(tracker.identifier, storage))
+                        # Use the versions found in storage, or the base tracker when the
+                        # tracker has not been evaluated yet (mirrors a plain identifier).
+                        versions = self._find_versions(tracker.identifier, storage)
+                        trackers.extend(versions if versions else [tracker.reversion(None)])
                 continue
 
             identifier, version = parse_reference(reference)
 
-            if not identifier in self._trackers:
+            if identifier is None or identifier not in self._trackers:
                 if not skip_unknown:
                     raise ToolkitException("Unable to resolve tracker reference: {}".format(reference))
-                else:
-                    continue
+                continue
 
             base = self._trackers[identifier]
 
@@ -233,38 +243,38 @@ class Registry(object):
 
         return trackers
 
-    def _find_versions(self, identifier: str, storage: "Storage"):
+    def _find_versions(self, identifier: str, storage: Storage | None) -> list["Tracker"]:
         """Finds all versions of the tracker in the storage.
 
         :param identifier: The identifier of the tracker.
-        :type identifier: str
-        :param storage: The storage to use for finding the versions.
-        :type storage: Storage
+        :param storage: The storage to use for finding the versions, or ``None``
+            to skip per-version lookup.
 
-        :returns: List of trackers.
-        :rtype: list"""
+        :returns: List of trackers."""
 
-        trackers = []
+        trackers: list["Tracker"] = []
 
         if storage is None:
             return trackers
 
         for reference in storage.folders():
             if reference.startswith(identifier + "@") or reference == identifier:
-                identifier, version = parse_reference(reference)
-                base = self._trackers[identifier]
+                parsed_id, version = parse_reference(reference)
+                if parsed_id is None or parsed_id not in self._trackers:
+                    continue
+                base = self._trackers[parsed_id]
                 trackers.append(base.reversion(version))
 
         return trackers
 
-    def references(self):
+    def references(self) -> list[str]:
         """Returns a list of all tracker references.
 
         :returns: List of tracker references.
         :rtype: list"""
         return [t.reference for t in self._trackers.values()]
 
-    def identifiers(self):
+    def identifiers(self) -> list[str]:
         """Returns a list of all tracker identifiers.
 
         :returns: List of tracker identifiers.
@@ -275,7 +285,7 @@ class Tracker(object):
     """Tracker definition class."""
 
     @staticmethod
-    def _collect_envvars(**kwargs):
+    def _collect_envvars(**kwargs: Any) -> tuple[dict, dict]:
         """Collects environment variables from the keyword arguments.
 
         :param **kwargs: Keyword arguments.
@@ -299,7 +309,7 @@ class Tracker(object):
         return envvars, other
 
     @staticmethod
-    def _collect_arguments(**kwargs):
+    def _collect_arguments(**kwargs: Any) -> tuple[dict, dict]:
         """Collects arguments from the keyword arguments.
 
         :param **kwargs: Keyword arguments.
@@ -323,11 +333,11 @@ class Tracker(object):
         return arguments, other
 
     @staticmethod
-    def _collect_metadata(**kwargs):
+    def _collect_metadata(**kwargs: Any) -> tuple[dict, dict]:
         """Collects metadata from the keyword arguments.
 
         :param **kwargs: Keyword arguments.
-            
+
         :returns: Tuple of metadata and other keyword arguments.
         :rtype: tuple
         Examples:
@@ -340,7 +350,7 @@ class Tracker(object):
         if "metadata" in kwargs:
             if isinstance(kwargs["metadata"], dict):
                 metadata.update(kwargs["metadata"])
-            del kwargs["arguments"]
+            del kwargs["metadata"]
 
         for name, value in kwargs.items():
             if name.startswith("meta_") and len(name) > 5:
@@ -350,7 +360,7 @@ class Tracker(object):
 
         return metadata, other
 
-    def __init__(self, _identifier, _source, command, protocol=None, label=None, version=None, tags=None, storage=None, **kwargs):
+    def __init__(self, _identifier: str, _source: str, command: str, protocol: str | None = None, label: str | None = None, version: str | None = None, tags: str | list[str] | None = None, storage: str | None = None, **kwargs: Any) -> None:
         """Initializes the tracker definition.
 
         :param _identifier: The identifier of the tracker.
@@ -388,25 +398,27 @@ class Tracker(object):
             self._tags = []
         elif isinstance(tags, str):
             self._tags = tags.split(",")
+        else:
+            self._tags = list(tags)
         self._tags = [tag.strip() for tag in self._tags]
         self._tags = [tag for tag in self._tags if is_valid_identifier(tag)]
-   
+
         if not self._version is None and not is_valid_identifier(self._version):
             raise TrackerException("Illegal version format", tracker=self)
 
-    def reversion(self, version=None) -> "Tracker":
-        """Creates a new tracker instance for specified version.
+    def reversion(self, version: str | None = None) -> "Tracker":
+        """Creates a new tracker instance for the specified version.
 
-            version {[type]} -- New version (default: {None})
+        :param version: New version, or None to return this instance unchanged.
 
-        :returns: Tracker -- [description]"""
+        :returns: This instance if the version is unchanged, otherwise a shallow copy with the new version."""
         if self.version == version or version is None:
             return self
         tracker = copy.copy(self)
         tracker._version = version
         return tracker
 
-    def runtime(self, log=False) -> "TrackerRuntime":
+    def runtime(self, log: bool = False) -> "TrackerRuntime":
         """Creates a new runtime instance for this tracker instance."""
         if not self._command:
             raise TrackerException("Tracker does not have an attached executable", tracker=self)
@@ -419,7 +431,7 @@ class Tracker(object):
 
         return _runtime_protocols[self._protocol](self, self._command, log=log, envvars=self._envvars, arguments=self._arguments, **self._args)
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         """Checks if two trackers are equal.
 
         :param other: The other tracker.
@@ -430,24 +442,25 @@ class Tracker(object):
         if other is None or not isinstance(other, Tracker):
             return False
 
-        return self.reference == other.identifier
+        return self.reference == other.reference
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         """Returns the hash of the tracker."""
         return hash(self.reference)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         """Returns the string representation of the tracker."""
         return self.reference
 
     @property
-    def source(self):
+    def source(self) -> str:
         """Returns the source of the tracker."""
         return self._source
 
     @property
-    def storage(self) -> "Storage":
-        """Returns the storage of the tracker results."""
+    def storage(self) -> Storage | None:
+        """Returns the storage of the tracker results, or ``None`` when the tracker
+        was constructed without an associated workspace storage."""
         return self._storage
 
     @property
@@ -456,24 +469,18 @@ class Tracker(object):
         return self._identifier
 
     @property
-    def label(self):
+    def label(self) -> str:
         """Returns the label of the tracker. If the version is specified, the label will
         contain the version as well.
 
-        :returns: Label of the tracker.
-        :rtype: str"""
+        :returns: Label of the tracker."""
         if self._version is None:
             return self._label
-        else:
-            return self._label + " (" + self._version + ")"
+        return self._label + " (" + self._version + ")"
 
     @property
-    def version(self) -> str:
-        """Returns the version of the tracker. If the version is not specified, None is
-        returned.
-
-        :returns: Version of the tracker.
-        :rtype: str"""
+    def version(self) -> str | None:
+        """Returns the version of the tracker, or ``None`` when no version is specified."""
         return self._version
 
     @property
@@ -481,22 +488,17 @@ class Tracker(object):
         """Returns the reference of the tracker. If the version is specified, the
         reference will contain the version as well.
 
-        :returns: Reference of the tracker.
-        :rtype: str"""
+        :returns: Reference of the tracker."""
         if self._version is None:
             return self._identifier
-        else:
-            return self._identifier + "@" + self._version
+        return self._identifier + "@" + self._version
 
     @property
-    def protocol(self) -> str:
-        """Returns the communication protocol used by this tracker.
-
-        :returns: Communication protocol
-        :rtype: str"""
+    def protocol(self) -> str | None:
+        """Returns the communication protocol used by this tracker, if any."""
         return self._protocol
 
-    def describe(self):
+    def describe(self) -> dict:
         """Returns a dictionary containing the tracker description.
 
         :returns: Dictionary containing the tracker description.
@@ -505,13 +507,13 @@ class Tracker(object):
         data.update(self._args)
         return data
 
-    def metadata(self, key):
+    def metadata(self, key: str) -> object | None:
         """Returns the metadata value for specified key."""
         if not key in self._metadata:
             return None
         return self._metadata[key]
 
-    def tagged(self, tag):
+    def tagged(self, tag: str) -> bool:
         """Returns true if the tracker is tagged with specified tag.
 
         :param tag: The tag to check.
@@ -530,7 +532,7 @@ class ObjectStatus(tuple):
     __slots__ = ()
     _fields = ("region", "properties")
 
-    def __new__(cls, region, properties):
+    def __new__(cls, region: Region, properties: dict) -> "ObjectStatus":
         if not isinstance(region, Region):
             raise TypeError("ObjectStatus.region must be a Region")
         if not isinstance(properties, dict):
@@ -538,22 +540,22 @@ class ObjectStatus(tuple):
         return tuple.__new__(cls, (region, properties))
 
     @property
-    def region(self):
+    def region(self) -> Region:
         return self[0]
 
     @property
-    def properties(self):
+    def properties(self) -> dict:
         return self[1]
 
     @classmethod
-    def _make(cls, iterable):
+    def _make(cls, iterable: Iterable) -> "ObjectStatus":
         region, properties = iterable
         return cls(region, properties)
 
-    def _asdict(self):
+    def _asdict(self) -> OrderedDict:
         return OrderedDict(zip(self._fields, self))
 
-    def _replace(self, **kwargs):
+    def _replace(self, **kwargs: Any) -> "ObjectStatus":
         return self.__class__(
             kwargs.get("region", self.region),
             kwargs.get("properties", self.properties)
@@ -566,7 +568,7 @@ class ObjectQuery(tuple):
     __slots__ = ()
     _fields = ("state", "properties", "offset")
 
-    def __new__(cls, state, properties, offset):
+    def __new__(cls, state: Region, properties: dict, offset: int) -> "ObjectQuery":
         if not isinstance(state, Region):
             raise TypeError("ObjectQuery.state must be a Region")
         if not isinstance(properties, dict):
@@ -576,26 +578,26 @@ class ObjectQuery(tuple):
         return tuple.__new__(cls, (state, properties, offset))
 
     @property
-    def state(self):
+    def state(self) -> Region:
         return self[0]
 
     @property
-    def properties(self):
+    def properties(self) -> dict:
         return self[1]
 
     @property
-    def offset(self):
+    def offset(self) -> int:
         return self[2]
 
     @classmethod
-    def _make(cls, iterable):
+    def _make(cls, iterable: Iterable) -> "ObjectQuery":
         state, properties, offset = iterable
         return cls(state, properties, offset)
 
-    def _asdict(self):
+    def _asdict(self) -> OrderedDict:
         return OrderedDict(zip(self._fields, self))
 
-    def _replace(self, **kwargs):
+    def _replace(self, **kwargs: Any) -> "ObjectQuery":
         return self.__class__(
             kwargs.get("state", self.state),
             kwargs.get("properties", self.properties),
@@ -609,28 +611,28 @@ class FrameResult(tuple):
     __slots__ = ()
     _fields = ("objects", "time")
 
-    def __new__(cls, objects, time):
+    def __new__(cls, objects: FrameObjects, time: float) -> "FrameResult":
         if not isinstance(time, Real):
             raise TypeError("FrameResult.time must be a real number")
         return tuple.__new__(cls, (objects, float(time)))
 
     @property
-    def objects(self):
+    def objects(self) -> FrameObjects:
         return self[0]
 
     @property
-    def time(self):
+    def time(self) -> float:
         return self[1]
 
     @classmethod
-    def _make(cls, iterable):
+    def _make(cls, iterable: Iterable) -> "FrameResult":
         objects, time = iterable
         return cls(objects, time)
 
-    def _asdict(self):
+    def _asdict(self) -> OrderedDict:
         return OrderedDict(zip(self._fields, self))
 
-    def _replace(self, **kwargs):
+    def _replace(self, **kwargs: Any) -> "FrameResult":
         return self.__class__(
             kwargs.get("objects", self.objects),
             kwargs.get("time", self.time)
@@ -643,7 +645,7 @@ class RunResult(tuple):
     __slots__ = ()
     _fields = ("objects", "times")
 
-    def __new__(cls, objects, times):
+    def __new__(cls, objects: list, times: list) -> "RunResult":
         if not isinstance(objects, list):
             raise TypeError("RunResult.objects must be a list")
         if not isinstance(times, list):
@@ -653,31 +655,35 @@ class RunResult(tuple):
         return tuple.__new__(cls, (objects, [float(t) for t in times]))
 
     @property
-    def objects(self):
+    def objects(self) -> list:
         return self[0]
 
     @property
-    def times(self):
+    def times(self) -> list[float]:
         return self[1]
 
     @classmethod
-    def _make(cls, iterable):
+    def _make(cls, iterable: Iterable) -> "RunResult":
         objects, times = iterable
         return cls(objects, times)
 
-    def _asdict(self):
+    def _asdict(self) -> OrderedDict:
         return OrderedDict(zip(self._fields, self))
 
-    def _replace(self, **kwargs):
+    def _replace(self, **kwargs: Any) -> "RunResult":
         return self.__class__(
             kwargs.get("objects", self.objects),
             kwargs.get("times", self.times)
         )
 
 
-RunQueries = List[ObjectQuery]
+RunQueries = list[ObjectQuery]
 
-FrameObjects = Union[List[ObjectStatus], ObjectStatus, None]
+# ``FrameObjects`` represents the *value* shape of objects passed to / returned
+# from a tracker runtime: either a list (multi-object) or a single ObjectStatus
+# (single-object). ``FrameObjects | None`` is the appropriate type for
+# parameters that may also be omitted (``new=None``).
+FrameObjects = list[ObjectStatus] | ObjectStatus
 
 
 class TrackerRuntime(ABC):
@@ -687,7 +693,7 @@ class TrackerRuntime(ABC):
     with it.
     """
 
-    def __init__(self, tracker: Tracker):
+    def __init__(self, tracker: Tracker) -> None:
         """Creates a new tracker runtime instance.
 
         :param tracker: The tracker instance.
@@ -695,19 +701,23 @@ class TrackerRuntime(ABC):
         """
         self._tracker = tracker
 
-    def run(self, frames: List[Frame], queries: RunQueries) -> RunResult: 
+    def run(self, frames: Iterable[Frame], queries: RunQueries) -> RunResult:
         """
-        Runs the tracker on the specified frames and queries. 
+        Runs the tracker on the specified frames and queries.
         Returns a dictionary containing the objects for each query.
-        
+
+        ``frames`` is any iterable of :class:`vot.dataset.Frame` — a plain
+        ``list[Frame]`` or a :class:`vot.dataset.Sequence`-like iterable
+        both work.
+
         Args:
-            frames (List[Frame]): The frames to run the tracker on.
-            queries (Dict[str, ObjectQuery]): The queries to run the tracker on.
+            frames: The frames to run the tracker on.
+            queries: The queries to run the tracker on.
 
         Returns:
             RunResult: A run result containing the objects and times for each query.
         """
-        
+
         raise NotImplementedError("TrackerRuntime.run() is not implemented. Please implement the run() method in the tracker runtime implementation.")
 
     @property
@@ -715,21 +725,21 @@ class TrackerRuntime(ABC):
         """Returns the tracker instance associated with this runtime."""
         return self._tracker
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         """Starts the tracker runtime."""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None) -> None:
         """Stops the tracker runtime."""
         self.stop()
 
     @property
-    def multiobject(self):
+    def multiobject(self) -> bool:
         """Returns True if the tracker supports multiple objects, False otherwise."""
         return False
 
     @abstractmethod
-    def stop(self):
+    def stop(self) -> None:
         """Stops the tracker runtime."""
         raise NotImplementedError
 
@@ -741,7 +751,7 @@ class OnlineTrackerRuntime(TrackerRuntime):
     with it.
     """
 
-    def __init__(self, tracker: Tracker):
+    def __init__(self, tracker: Tracker) -> None:
         """Creates a new tracker runtime instance.
 
         :param tracker: The tracker instance.
@@ -755,98 +765,108 @@ class OnlineTrackerRuntime(TrackerRuntime):
         """Returns the tracker instance associated with this runtime."""
         return self._tracker
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         """Starts the tracker runtime."""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None) -> None:
         """Stops the tracker runtime."""
         self.stop()
 
     @property
-    def multiobject(self):
+    def multiobject(self) -> bool:
         """Returns True if the tracker supports multiple objects, False otherwise."""
         return False
 
     @abstractmethod
-    def stop(self):
+    def stop(self) -> None:
         """Stops the tracker runtime."""
         raise NotImplementedError
 
     @abstractmethod
-    def restart(self):
+    def restart(self) -> None:
         """Restarts the tracker runtime, usually stars a new process."""
         raise NotImplementedError
 
     @abstractmethod
-    def initialize(self, frame: Frame, new: FrameObjects = None) -> Tuple[FrameObjects, float]:
+    def initialize(self, frame: Frame, new: FrameObjects | None = None) -> tuple[FrameObjects, float]:
         """Initializes the tracker runtime with specified frame and objects. Returns the initial objects and the time it took to initialize the tracker.
-        
-        :param frame: The frame to initialize the tracker with.
-        :param new: The objects to initialize the tracker with. 
 
-        :returns: Tuple[Objects, float] -- The initial objects and the time it took to initialize the tracker."""
+        :param frame: The frame to initialize the tracker with.
+        :param new: The objects to initialize the tracker with.
+
+        :returns: tuple[FrameObjects, float] -- The initial objects and the time it took to initialize the tracker."""
         raise NotImplementedError
 
     @abstractmethod
-    def update(self, frame: Frame, new: FrameObjects = None) -> Tuple[FrameObjects, float]:
+    def update(self, frame: Frame, new: FrameObjects | None = None) -> tuple[FrameObjects, float]:
         """Updates the tracker runtime with specified frame and objects. Returns the
         updated objects and the time it took to update the tracker.
 
         :param frame: The frame to update the tracker with.
         :param new: The objects to update the tracker with.
-        
-        :returns: Tuple[Objects, float] -- The updated objects and the time it took to update the tracker.
+
+        :returns: tuple[FrameObjects, float] -- The updated objects and the time it took to update the tracker.
         """
         raise NotImplementedError
 
-    def run(self, frames: List[Frame], queries: RunQueries) -> RunResult:
-        """Runs the tracker on the given frames and queries. 
-        Returns the tracker output as a RunStatus namedtuple.
-        The online tracker runtime uses the interface defined by 
-        the initialize and update methods to run the tracker 
+    def run(self, frames: Iterable[Frame], queries: RunQueries) -> RunResult:
+        """Runs the tracker on the given frames and queries.
+        Returns a RunResult with the objects and times for each query.
+        The online tracker runtime uses the interface defined by
+        the initialize and update methods to run the tracker
         on the given frames and queries.
 
-        :param frames: The frames to run the tracker on.
+        :param frames: Iterable of frames (e.g. a ``list[Frame]`` or a
+            :class:`vot.dataset.Sequence`).
         :param queries: The queries to run the tracker on.
         """
-        
+
         # Order the queries by offset and id
-        
+
         statuses = []
         # Initialize statuses with empty lists for each query
         for i in range(len(queries)):
             statuses.append([])
-        
+
         times = []
-        
+
         for i, frame in enumerate(frames):
             # Filter out objects appearing in the current frame
             new = [ObjectStatus(queries[j].state, queries[j].properties) for j in range(len(queries)) if queries[j].offset == i]
-        
+
             if i == 0:
-                status, time = self.initialize(frames[0], new)
+                # ``frame`` IS the 0th element of ``frames`` here — no need to index back
+                # into ``frames``, which keeps the parameter type as ``Iterable[Frame]``.
+                status, time = self.initialize(frame, new)
             else:
                 status, time = self.update(frame, new)
-        
+
             times.append(time)
-        
+
+            # ``initialize``/``update`` may return either a list of ObjectStatus
+            # (one per query) or — for single-object trackers — a bare ObjectStatus.
+            # Normalize to a list: a bare ObjectStatus is a 2-tuple, so the per-query
+            # indexing below would otherwise silently yield its region field.
+            if isinstance(status, ObjectStatus):
+                status = [status]
+
             for j in range(len(queries)):
                 if queries[j].offset <= i:
                     statuses[j].append(status[j])
                 else:
-                    statuses[j].append(ObjectStatus(Special(Trajectory.UNKNOWN), {})) 
-                   
+                    statuses[j].append(ObjectStatus(Special(SpecialCode.UNKNOWN), {}))
+
         return RunResult(statuses, times)
 
-class RealtimeTrackerRuntime(TrackerRuntime):
+class RealtimeTrackerRuntime(OnlineTrackerRuntime):
     """Base class for realtime tracker runtime implementations.
 
     Realtime tracker runtime is responsible for running the tracker executable and
     communicating with it while simulating given real-time constraints.
     """
 
-    def __init__(self, runtime: TrackerRuntime, grace: int = 1, interval: float = 0.1):
+    def __init__(self, runtime: OnlineTrackerRuntime, grace: int = 1, interval: float = 0.1) -> None:
         """Initializes the realtime tracker runtime with specified tracker runtime,
         grace period and update interval.
 
@@ -856,7 +876,7 @@ class RealtimeTrackerRuntime(TrackerRuntime):
         """
         if not isinstance(runtime, OnlineTrackerRuntime):
             raise ValueError("Runtime does not support online communication")
-        
+
         super().__init__(runtime.tracker)
         self._runtime = runtime
         self._grace = grace
@@ -866,30 +886,30 @@ class RealtimeTrackerRuntime(TrackerRuntime):
         self._status = None
 
     @property
-    def multiobject(self):
+    def multiobject(self) -> bool:
         """Returns True if the tracker supports multiple objects, False otherwise."""
         return self._runtime.multiobject
 
-    def stop(self):
+    def stop(self) -> None:
         """Stops the tracker runtime."""
         self._runtime.stop()
         self._time = 0
         self._status = None
 
-    def restart(self):
+    def restart(self) -> None:
         """Restarts the tracker runtime, usually stars a new process."""
         self._runtime.restart()
         self._time = 0
         self._status = None
 
-    def initialize(self, frame: Frame, new: FrameObjects = None) -> Tuple[FrameObjects, float]:
+    def initialize(self, frame: Frame, new: FrameObjects | None = None) -> tuple[FrameObjects, float]:
         """Initializes the tracker runtime with specified frame and objects. Returns the
         initial objects and the time it took to initialize the tracker.
 
         :param frame: The frame to initialize the tracker with.
         :param new: The objects to initialize the tracker with.
-        
-        :returns: Tuple[Objects, float] -- The initial objects and the time it took to initialize the tracker."""
+
+        :returns: tuple[FrameObjects, float] -- The initial objects and the time it took to initialize the tracker."""
         self._countdown = self._grace
         self._status = None
 
@@ -908,7 +928,7 @@ class RealtimeTrackerRuntime(TrackerRuntime):
         return status, time
 
 
-    def update(self, frame: Frame, new: FrameObjects = None) -> Tuple[FrameObjects, float]:
+    def update(self, frame: Frame, new: FrameObjects | None = None) -> tuple[FrameObjects, float]:
         """Updates the tracker runtime with specified frame and objects. Returns the
         updated objects and the time it took to update the tracker.
 
@@ -918,16 +938,23 @@ class RealtimeTrackerRuntime(TrackerRuntime):
         :param frame: The frame to update the tracker with.
         :param new: The objects to update the tracker with. Setting new objects is not supported in realtime tracker and will raise an assertion error.
 
-        :returns: Tuple[Objects, float] -- The updated objects and the time it took to update the tracker."""
+        :returns: tuple[FrameObjects, float] -- The updated objects and the time it took to update the tracker."""
 
-        assert new is None or len(new) == 0, "Adding new objects is not supported in realtime tracker runtime"
+        # Pyright can't tell that ``len(...)`` is safe after the ``None`` check
+        # because ``FrameObjects`` includes a bare ``ObjectStatus`` (a namedtuple
+        # for which ``len`` is the field count). Guard with isinstance instead.
+        assert new is None or (isinstance(new, list) and len(new) == 0), \
+            "Adding new objects is not supported in realtime tracker runtime"
 
         if self._time > self._interval:
             self._time = self._time - self._interval
+            # During the cached-status window we replay the last successful
+            # status — ``self._status`` is set only when one was captured, so
+            # narrow before returning.
+            assert self._status is not None, "Realtime cached status was not set yet"
             return self._status, 0
-        else:
-            self._status = None
-            self._time = 0
+        self._status = None
+        self._time = 0
 
         status, time = self._runtime.update(frame, None)
 

@@ -3,10 +3,10 @@
 This module contains functions for rasterizing different region types.
 """
 
-from typing import List, Tuple, Optional
 
 import numba
 import numpy as np
+import numpy.typing as npt
 
 _TYPE_EMPTY = 0
 _TYPE_RECTANGLE = 1
@@ -14,13 +14,13 @@ _TYPE_POLYGON = 2
 _TYPE_MASK = 3
 
 @numba.njit(cache=True)
-def mask_bounds(mask: np.ndarray):
+def mask_bounds(mask: npt.NDArray) -> tuple[int, int, int, int]:
     """Compute bounds of a binary mask. Bounds are defined as the minimal axis-aligned
     region containing all positive pixels. This is a Numba implementation of the
     function that is compiled to machine code for faster execution.
 
     :param mask: 2-D array with a binary mask
-    :type mask: np.ndarray
+    :type mask: npt.NDArray
 
     :returns: coordinates of the top-left and bottom-right corners of the minimal axis-aligned region containing all positive pixels"""
     ii32 = np.iinfo(np.int32)
@@ -44,7 +44,7 @@ def mask_bounds(mask: np.ndarray):
 
 
 @numba.njit(cache=True)
-def rasterize_rectangle(data: np.ndarray, bounds: Tuple[int, int, int, int]):
+def rasterize_rectangle(data: npt.NDArray, bounds: tuple[int, int, int, int]) -> npt.NDArray:
     """Rasterize a rectangle. This is a Numba implementation of the function that is
     compiled to machine code for faster execution.
 
@@ -70,7 +70,7 @@ def rasterize_rectangle(data: np.ndarray, bounds: Tuple[int, int, int, int]):
     return mask
 
 @numba.njit(cache=True)
-def rasterize_polygon(data: np.ndarray, bounds: Tuple[int, int, int, int]):
+def rasterize_polygon(data: npt.NDArray, bounds: tuple[int, int, int, int]) -> npt.NDArray:
     """Rasterize a polygon. This is a Numba implementation of the function that is
     compiled to machine code for faster execution.
 
@@ -152,7 +152,7 @@ def rasterize_polygon(data: np.ndarray, bounds: Tuple[int, int, int, int]):
 
 
 @numba.njit(cache=True)
-def copy_mask(mask: np.ndarray, offset: Tuple[int, int], bounds: Tuple[int, int, int, int]):
+def copy_mask(mask: npt.NDArray, offset: tuple[int, int], bounds: tuple[int, int, int, int]) -> npt.NDArray:
     """Copy a mask to a new location. This is a Numba implementation of the function
     that is compiled to machine code for faster execution.
 
@@ -182,7 +182,7 @@ def copy_mask(mask: np.ndarray, offset: Tuple[int, int], bounds: Tuple[int, int,
     return copy
 
 @numba.njit(cache=True)
-def _bounds_rectangle(a):
+def _bounds_rectangle(a: npt.NDArray) -> tuple[int, int, int, int]:
     """Calculate the bounds of a rectangle. This is a Numba implementation of the
     function that is compiled to machine code for faster execution.
 
@@ -192,7 +192,7 @@ def _bounds_rectangle(a):
     return (int(round(a[0, 0])), int(round(a[1, 0])), int(round(a[0, 0] + a[2, 0] - 1)), int(round(a[1, 0] + a[3, 0] - 1)))
 
 @numba.njit(cache=True)
-def _bounds_polygon(a):
+def _bounds_polygon(a: npt.NDArray) -> tuple[int, int, int, int]:
     """Calculate the bounds of a polygon. This is a Numba implementation of the function
     that is compiled to machine code for faster execution.
 
@@ -213,7 +213,7 @@ def _bounds_polygon(a):
     return (int(round(left)), int(round(top)), int(round(right)), int(round(bottom)))
 
 @numba.njit(cache=True)
-def _bounds_mask(a, o):
+def _bounds_mask(a: npt.NDArray, o: tuple[int, int]) -> tuple[int, int, int, int]:
     """Calculate the bounds of a mask. This is a Numba implementation of the function
     that is compiled to machine code for faster execution.
 
@@ -225,47 +225,50 @@ def _bounds_mask(a, o):
     return (bounds[0] + o[0], bounds[1] + o[1], bounds[2] + o[0], bounds[3] + o[1])
 
 @numba.njit(cache=True)
-def _region_bounds(a: np.ndarray, t: int, o: Optional[Tuple[int, int]] = None):
+def _region_bounds(a: npt.NDArray, t: int, o: tuple[int, int] | None = None) -> tuple[int, int, int, int]:
     """Calculate the bounds of a region. This is a Numba implementation of the function
     that is compiled to machine code for faster execution.
 
     :param a: 2-D array with the mask
     :param t: type of the region
-    :param o: 2-tuple with the offset of the mask
+    :param o: 2-tuple with the offset of the mask (only required when ``t == _TYPE_MASK``)
 
     :returns: 4-tuple with the bounds of the region (left, top, right, bottom)"""
     if t == _TYPE_RECTANGLE:
         return _bounds_rectangle(a)
-    elif t == _TYPE_POLYGON:
+    if t == _TYPE_POLYGON:
         return _bounds_polygon(a)
-    elif t == _TYPE_MASK:
-        return _bounds_mask(a, o)
+    if t == _TYPE_MASK:
+        # When the caller picks the mask code path, the offset must be supplied;
+        # fall back to (0, 0) defensively to satisfy the non-Optional signature
+        # of ``_bounds_mask``.
+        return _bounds_mask(a, (0, 0) if o is None else o)
     return (0, 0, 0, 0)
 
 @numba.njit(cache=True)
-def _region_raster(a: np.ndarray, bounds: Tuple[int, int, int, int], t: int, o: Optional[Tuple[int, int]] = None):
+def _region_raster(a: npt.NDArray, bounds: tuple[int, int, int, int], t: int, o: tuple[int, int] | None = None) -> npt.NDArray:
     """Rasterize a region. This is a Numba implementation of the function that is
     compiled to machine code for faster execution.
 
     :param a: 2-D array with the mask
     :param bounds: 4-tuple with the bounds of the image (left, top, right, bottom)
     :param t: type of the region
-    :param o: 2-tuple with the offset of the mask
+    :param o: 2-tuple with the offset of the mask (only required when ``t == _TYPE_MASK``)
 
     :returns: 2-D array with the rasterized region"""
 
     if t == _TYPE_RECTANGLE:
         return rasterize_rectangle(a, bounds)
-    elif t == _TYPE_POLYGON:
+    if t == _TYPE_POLYGON:
         return rasterize_polygon(a, bounds)
-    elif t == _TYPE_MASK:
-        return copy_mask(a, o, bounds)
-    
+    if t == _TYPE_MASK:
+        return copy_mask(a, (0, 0) if o is None else o, bounds)
+
     return np.zeros((bounds[3] - bounds[1] + 1, bounds[2] - bounds[0] + 1), dtype=np.uint8)
 
 @numba.njit(cache=True)
-def _calculate_overlap(a: np.ndarray, b: np.ndarray, at: int, bt: int, ao: Optional[Tuple[int, int]] = None,
-        bo: Optional[Tuple[int, int]] = None, bounds: Optional[Tuple[int, int]] = None, ignore: Optional[np.array] = None, it: Optional[int] = None, io: Optional[Tuple[int, int]] = None):
+def _calculate_overlap(a: npt.NDArray, b: npt.NDArray, at: int, bt: int, ao: tuple[int, int] | None = None,
+        bo: tuple[int, int] | None = None, bounds: tuple[int, int] | None = None, ignore: npt.NDArray | None = None, it: int | None = None, io: tuple[int, int] | None = None) -> float:
     """Calculate the overlap between two regions. This is a Numba implementation of the
     function that is compiled to machine code for faster execution.
 
@@ -275,7 +278,7 @@ def _calculate_overlap(a: np.ndarray, b: np.ndarray, at: int, bt: int, ao: Optio
     :param bt: type of the second region
     :param ao: 2-tuple with the offset of the first mask
     :param bo: 2-tuple with the offset of the second mask
-    :param bounds: 2-tuple with the bounds of the image (left, top, right, bottom)
+    :param bounds: 2-tuple with the bounds of the image (width, height)
     :param ignore: 2-D array with the mask of the region to ignore
     :param it: type of the region to ignore
     :param io: 2-tuple with the offset of the mask to ignore
@@ -309,7 +312,7 @@ def _calculate_overlap(a: np.ndarray, b: np.ndarray, at: int, bt: int, ao: Optio
     intersection = 0
     union_ = 0
 
-    if not ignore is None and it != _TYPE_EMPTY:
+    if ignore is not None and it is not None and it != _TYPE_EMPTY:
         m3 = _region_raster(ignore, raster_bounds, it, io)
         a3 = m3.ravel()
         for i in range(a1.size):
@@ -330,49 +333,58 @@ def _calculate_overlap(a: np.ndarray, b: np.ndarray, at: int, bt: int, ao: Optio
 from vot.region import Region, RegionException
 from vot.region.shapes import Shape, Rectangle, Polygon, Mask
 
-Bounds = Tuple[int, int]
+Bounds = tuple[int, int]
 
-def _infer_meta(reg: Region):
+def _infer_meta(reg: Region | None) -> tuple[npt.NDArray, tuple[int, int], int]:
+    """Extract the raster representation of a region as ``(data, offset, type_code)``.
+
+    Non-shape (or ``None``) inputs degrade to the empty-region representation, which
+    is the runtime expectation of :func:`_calculate_overlap`.
+    """
     if isinstance(reg, Rectangle):
-        data1 = np.round(reg._data)
-        offset1 = (0, 0)
-        type1 = _TYPE_RECTANGLE
-    elif isinstance(reg, Polygon):
-        data1 = np.round(reg._points)
-        offset1 = (0, 0)
-        type1 = _TYPE_POLYGON
-    elif isinstance(reg, Mask):
-        data1 = reg.mask
-        offset1 = reg.offset
-        type1 = _TYPE_MASK
-    else:
-        data1 = np.zeros((1, 1))
-        offset1 = (0, 0)
-        type1 = _TYPE_EMPTY
+        return np.round(reg._data), (0, 0), _TYPE_RECTANGLE
+    if isinstance(reg, Polygon):
+        return np.round(reg._points), (0, 0), _TYPE_POLYGON
+    if isinstance(reg, Mask):
+        return reg.mask, reg.offset, _TYPE_MASK
+    return np.zeros((1, 1)), (0, 0), _TYPE_EMPTY
 
-    return data1, offset1, type1
 
-def calculate_overlap(reg1: Shape, reg2: Shape, bounds: Optional[Bounds] = None, ignore: Optional[Shape] = None):
+def calculate_overlap(
+    reg1: Region | None,
+    reg2: Region | None,
+    bounds: Bounds | None = None,
+    ignore: Region | None = None,
+) -> float:
     """Calculate the overlap between two regions. The function first rasterizes both
     regions to 2-D binary masks and calculates overlap between them.
+
+    Accepts any :class:`Region` subclass (or ``None``); non-shape inputs are treated
+    as empty regions, matching the runtime behaviour.
 
     :param reg1: first region
     :param reg2: second region
     :param bounds: 2-tuple with the bounds of the image (width, height)
     :param ignore: region to ignore when calculating overlap, usually a mask
 
-    :returns: float with the overlap between the two regions. Note that overlap is one by definition if both regions are empty."""
+    :returns: overlap between the two regions. One by definition if both regions are empty."""
 
     data1, offset1, type1 = _infer_meta(reg1)
     data2, offset2, type2 = _infer_meta(reg2)
 
-    if not ignore is None:
+    if ignore is not None:
         ignore_data, ignore_offset, ignore_type = _infer_meta(ignore)
         return _calculate_overlap(data1, data2, type1, type2, offset1, offset2, bounds, ignore_data, ignore_type, ignore_offset)
 
     return _calculate_overlap(data1, data2, type1, type2, offset1, offset2, bounds)
 
-def calculate_overlaps(first: List[Region], second: List[Region], bounds: Optional[Bounds] = None, ignore: Optional[List[Region]] = None):
+
+def calculate_overlaps(
+    first: list[Region],
+    second: list[Region],
+    bounds: Bounds | None = None,
+    ignore: list[Region] | None = None,
+) -> list[float]:
     """Calculate the overlap between two lists of regions. The function first rasterizes
     both regions to 2-D binary masks and calculates overlap between them.
 
@@ -383,11 +395,11 @@ def calculate_overlaps(first: List[Region], second: List[Region], bounds: Option
 
     :returns: list of floats with the overlap between the two regions. Note that overlap is one by definition if both regions are empty.
     :raises RegionException: if the lists are not of the same size"""
-    if not len(first) == len(second):
+    if len(first) != len(second):
         raise RegionException("List not of the same size {} != {}".format(len(first), len(second)))
-    
-    if not ignore is None:
-        if not len(first) == len(ignore):
+
+    if ignore is not None:
+        if len(first) != len(ignore):
             raise RegionException("List not of the same size {} != {}".format(len(first), len(ignore)))
-        return [calculate_overlap(pairs[0], pairs[1], bounds=bounds, ignore=ignore[i]) for i, pairs in enumerate(zip(first, second))]
-    return [calculate_overlap(pairs[0], pairs[1], bounds=bounds) for i, pairs in enumerate(zip(first, second))]
+        return [calculate_overlap(a, b, bounds=bounds, ignore=ignore[i]) for i, (a, b) in enumerate(zip(first, second))]
+    return [calculate_overlap(a, b, bounds=bounds) for a, b in zip(first, second)]

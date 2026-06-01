@@ -11,12 +11,12 @@ import inspect
 import time
 import concurrent.futures as futures
 from logging import Formatter, LogRecord
+from types import TracebackType
 
 from numbers import Number
-from typing import Any, Mapping, Tuple
+from typing import Any, Mapping
 import typing
 
-import six
 import colorama
 
 from class_registry import ClassRegistry
@@ -27,9 +27,9 @@ def import_class(classpath: str) -> typing.Type:
     :param classpath: String representing a canonical class name with all parent packages.
     :type classpath: str
 
-    :raises ImportError: Raised when
-    :returns: [description]
-    :rtype: [type]"""
+    :raises ImportError: If ``classpath`` has no package qualifier (no ``.``).
+    :returns: The imported class.
+    :rtype: type"""
     delimiter = classpath.rfind(".")
     if delimiter == -1:
         raise ImportError("Class alias '{}' not found".format(classpath))
@@ -38,7 +38,7 @@ def import_class(classpath: str) -> typing.Type:
         module = __import__(classpath[0:delimiter], globals(), locals(), [classname])
         return getattr(module, classname)
 
-def class_fullname(o):
+def class_fullname(o: object) -> str:
     """Returns the full name of the class of the given object.
 
     :param o: The object to get the class name from.
@@ -46,7 +46,7 @@ def class_fullname(o):
     :returns: The full name of the class of the given object."""
     return class_string(o.__class__)
 
-def class_string(kls):
+def class_string(kls: type) -> str:
     """Returns the full name of the given class.
 
     :param kls: The class to get the name from.
@@ -59,7 +59,7 @@ def class_string(kls):
     else:
         return module + '.' + kls.__name__
 
-def flip(size: Tuple[Number, Number]) -> Tuple[Number, Number]:
+def flip(size: tuple[Number, Number]) -> tuple[Number, Number]:
     """Flips the given size tuple.
 
     :param size: The size tuple to flip.
@@ -67,7 +67,7 @@ def flip(size: Tuple[Number, Number]) -> Tuple[Number, Number]:
     :returns: The flipped size tuple."""
     return (size[1], size[0])
 
-def flatten(nested_list):
+def flatten(nested_list: list) -> list:
     """Flattens a nested list.
 
     :param nested_list: The nested list to flatten.
@@ -80,7 +80,7 @@ class Progress(object):
     """Wrapper around tqdm progress bar, enables silecing the progress output and some
     more costumizations."""
 
-    def __init__(self, description="Processing", total=100):
+    def __init__(self, description: str ="Processing", total: int = 100) -> None:
         """Creates a new progress bar.
 
         :param description: The description of the progress bar.
@@ -102,16 +102,16 @@ class Progress(object):
         silent = get_logger().level > logging.INFO
 
         if not silent:
-            self._bar = tqdm(disable=None, 
+            self._bar = tqdm(disable=None, # type: ignore[arg-type]
                 bar_format=" {desc:20.20} |{bar}| {percentage:3.0f}% [{elapsed}<{remaining}]", file=sys.stdout, leave=False)
             self._bar.desc = description
             self._bar.total = total
-        if silent or self._bar.disable:
+        if silent or (self._bar and self._bar.disable):
             self._bar = None
             self._value = 0
             self._total = total if not silent else 0
 
-    def _percent(self, n):
+    def _percent(self, n: int) -> int:
         """Returns the percentage of the given value.
 
         :param n: The value to compute the percentage of.
@@ -119,7 +119,7 @@ class Progress(object):
         :returns: The percentage of the given value."""
         return int((n * 100) / self._total)
 
-    def absolute(self, value):
+    def absolute(self, value: int) -> None:
         """Sets the progress to the given value.
 
         :param value: The value to set the progress to.
@@ -134,7 +134,7 @@ class Progress(object):
         else:
             self._bar.update(value - self._bar.n)  # will also set self.n = b * bsize
         
-    def relative(self, n):
+    def relative(self, n: int) -> None:
         """Increments the progress by the given value.
 
         :param n: The value to increment the progress by.
@@ -149,7 +149,7 @@ class Progress(object):
         else:
             self._bar.update(n)  # will also set self.n = b * bsize 
 
-    def total(self, t):
+    def total(self, t: int) -> None:
         """Sets the total number of steps.
 
         :param t: The total number of steps.
@@ -164,19 +164,20 @@ class Progress(object):
             self._bar.total = t
             self._bar.refresh()
 
-    def close(self):
+    def close(self) -> None:
         """Closes the progress bar."""
         if self._bar:
             self._bar.close()
             
-    def __enter__(self):
+    def __enter__(self) -> "Progress":
         return self
-    
-    def __exit__(self, exc_type, exc_value, traceback):
+
+    def __exit__(self, exc_type: type[BaseException] | None, exc_value: BaseException | None,
+                 traceback: TracebackType | None) -> None:
         self.close()
         
 
-def extract_files(archive, destination, callback = None):
+def extract_files(archive: str, destination: str, callback: typing.Callable[[int, int], None] | None = None) -> None:
     """Extracts all files from the given archive to the given destination.
 
     :param archive: The archive to extract the files from.
@@ -196,7 +197,7 @@ def extract_files(archive, destination, callback = None):
             if callback:
                 callback(1, total)
 
-def read_properties(filename: str, delimiter: str = '=') -> typing.Dict[str, str]:
+def read_properties(filename: str, delimiter: str = '=') -> dict[str, str]:
     """Reads a given properties file with each line of the format key=value. Returns a
     dictionary containing the pairs.
 
@@ -206,12 +207,11 @@ def read_properties(filename: str, delimiter: str = '=') -> typing.Dict[str, str
     :type delimiter: str, optional
 
     :returns: Resuting properties as a dictionary
-    :rtype: [typing.Dict[str, str]]"""
+    :rtype: [dict[str, str]]"""
     if not os.path.exists(filename):
         return {}
-    open_kwargs = {'mode': 'r', 'newline': ''} if six.PY3 else {'mode': 'rb'}
     matcher = re.compile("^([a-zA-Z0-9_\\-.]+) *{} *(.*)$".format(delimiter))
-    with open(filename, **open_kwargs) as pfile:
+    with open(filename, mode='r', newline='') as pfile:
         properties = dict()
         for line in pfile.readlines():
             groups = matcher.match(line.strip())
@@ -220,7 +220,7 @@ def read_properties(filename: str, delimiter: str = '=') -> typing.Dict[str, str
             properties[groups.group(1)] = groups.group(2)
         return properties
 
-def write_properties(filename: str, dictionary: Mapping[str, Any], delimiter: str = '='):
+def write_properties(filename: str, dictionary: Mapping[str, Any], delimiter: str = '=') -> None:
     """Writes the provided dictionary in key sorted order to a properties
         file with each line in the format: key<delimiter>value
 
@@ -232,20 +232,19 @@ def write_properties(filename: str, dictionary: Mapping[str, Any], delimiter: st
     :type delimiter: str, optional
     """
 
-    open_kwargs = {'mode': 'w', 'newline': ''} if six.PY3 else {'mode': 'wb'}
-    with open(filename, **open_kwargs) as csvfile:
+    with open(filename, mode='w', newline='') as csvfile:
         writer = csv.writer(csvfile, delimiter=delimiter, escapechar='\\',
                             quoting=csv.QUOTE_NONE)
         writer.writerows(sorted(dictionary.items()))
 
-def file_hash(filename: str) -> Tuple[str, str]:
+def file_hash(filename: str) -> tuple[str, str]:
     """Calculates MD5 and SHA1 hashes based on file content.
 
     :param filename: Filename of the file to open and analyze
     :type filename: str
 
     :returns: MD5 and SHA1 hashes as hexadecimal strings.
-    :rtype: Tuple[str, str]"""
+    :rtype: tuple[str, str]"""
     
     bufsize = 65536  # lets read stuff in 64kb chunks!
 
@@ -262,7 +261,7 @@ def file_hash(filename: str) -> Tuple[str, str]:
 
     return md5.hexdigest(), sha1.hexdigest()
 
-def arg_hash(*args, **kwargs) -> str:
+def arg_hash(*args: typing.Any, **kwargs: typing.Any) -> str:
     """Computes hash based on input positional and keyword arguments.
 
     The algorithm tries to convert all arguments to string, then enclose them with delimiters. The
@@ -281,16 +280,14 @@ def arg_hash(*args, **kwargs) -> str:
 
     return sha1.hexdigest()
 
-def which(program: str) -> str:
+def which(program: str) -> str | None:
     """Locates an executable in system PATH list by its name.
 
     :param program: Name of the executable
-    :type program: str
 
-    :returns: Full path or None if not found
-    :rtype: str"""
+    :returns: Full path or None if not found."""
 
-    def is_exe(fpath):
+    def is_exe(fpath: str) -> bool:
         """Checks if the given path is an executable file.
 
         :param fpath: Path to check
@@ -312,7 +309,7 @@ def which(program: str) -> str:
 
     return None
 
-def normalize_path(path, root=None):
+def normalize_path(path: str, root: str | None = None) -> str:
     """Normalizes the given path by making it absolute and removing redundant parts.
 
     :param path: Path to normalize
@@ -328,7 +325,7 @@ def normalize_path(path, root=None):
         root = os.getcwd()
     return os.path.normpath(os.path.join(root, path))
 
-def localize_path(path):
+def localize_path(path: str) -> str:
     """Converts path to local format (backslashes on Windows, slashes on Linux)
 
     :param path: Path to convert
@@ -355,58 +352,53 @@ def to_string(n: Any) -> str:
     else:
         return str(n)
 
-def to_number(val, max_n = None, min_n = None, conversion=int):
+def to_number(
+    val: typing.Any,
+    max_n: float | None = None,
+    min_n: float | None = None,
+    conversion: typing.Callable[[typing.Any], typing.Any] = int,
+) -> typing.Any:
     """Converts the given value to a number and checks if it is within the given range.
     If the value is not a number, a RuntimeError is raised.
 
     :param val: Value to convert
-    :type val: Any
-    :param max_n: Maximum allowed value. Defaults to None.
-    :type max_n: int, optional
-    :param min_n: Minimum allowed value. Defaults to None.
-    :type min_n: int, optional
-    :param conversion: Conversion function. Defaults to int.
-    :type conversion: function, optional
+    :param max_n: Maximum allowed value
+    :param min_n: Minimum allowed value
+    :param conversion: Conversion function (e.g. ``int`` or ``float``).
 
-    :returns: Converted value
-    :rtype: int"""
+    :returns: Converted value (same type as ``conversion``'s return)."""
     try:
         n = conversion(val)
 
-        if not max_n is None:
-            if n > max_n:
-                raise RuntimeError("Parameter higher than maximum allowed value ({}>{})".format(n, max_n))
-        if not min_n is None:
-            if n < min_n:
-                raise RuntimeError("Parameter lower than minimum allowed value ({}<{})".format(n, min_n))
+        if max_n is not None and n > max_n:
+            raise RuntimeError("Parameter higher than maximum allowed value ({}>{})".format(n, max_n))
+        if min_n is not None and n < min_n:
+            raise RuntimeError("Parameter lower than minimum allowed value ({}<{})".format(n, min_n))
 
         return n
     except ValueError as ve:
         raise RuntimeError("Number conversion error") from ve
 
-def to_logical(val):
-    """Converts the given value to a logical value (True/False). If the value is not a
-    logical value, a RuntimeError is raised.
+def to_logical(val: typing.Any) -> bool:
+    """Converts the given value to a logical value (True/False).
+
+    Strings are matched case-insensitively against ``true``/``1``/``t``/``y``/``yes``
+    (anything else is False); non-string values use the built-in ``bool``.
 
     :param val: Value to convert
     :type val: Any
 
     :returns: Converted value
     :rtype: bool"""
-    try:
-        if isinstance(val, str):
-            return val.lower() in ['true', '1', 't', 'y', 'yes']
-        else:
-            return bool(val)
+    if isinstance(val, str):
+        return val.lower() in ['true', '1', 't', 'y', 'yes']
+    return bool(val)
 
-    except ValueError as ve:
-        raise RuntimeError("Logical value conversion error") from ve
-
-def format_size(num, suffix="B"):
+def format_size(num: float, suffix: str = "B") -> str:
     """Formats the given number as a human-readable size string.
 
     :param num: Number to format
-    :type num: int
+    :type num: float
     :param suffix: Suffix to use. Defaults to "B".
     :type suffix: str, optional
 
@@ -418,7 +410,7 @@ def format_size(num, suffix="B"):
         num /= 1024.0
     return f"{num:.1f}Yi{suffix}"
 
-def singleton(class_):
+def singleton(class_: typing.Callable[..., typing.Any]) -> typing.Callable[..., typing.Any]:
     """Singleton decorator for classes.
 
     :param class_: Class to decorate
@@ -433,8 +425,8 @@ def singleton(class_):
 
         a = MyClass()
     """
-    instances = {}
-    def getinstance(*args, **kwargs):
+    instances: dict[typing.Callable[..., typing.Any], typing.Any] = {}
+    def getinstance(*args: typing.Any, **kwargs: typing.Any) -> typing.Any:
         """Returns the singleton instance of the class.
 
         If the instance does not exist, it is created.
@@ -447,11 +439,7 @@ def singleton(class_):
 class ColoredFormatter(Formatter):
     """Colored log formatter using colorama package."""
 
-    class Empty(object):
-        """An empty class used to copy :class:`~logging.LogRecord` objects without
-        reinitializing them."""
-
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: typing.Any) -> None:
         """Initializes the formatter.
 
         :param **kwargs: Keyword arguments passed to the base class
@@ -477,35 +465,67 @@ class ColoredFormatter(Formatter):
 
         :returns: Formatted string
         :rtype: str"""
+        import copy as _copy
+
         style = self._styles[record.levelname.lower()]
 
-        copy = ColoredFormatter.Empty()
-        copy.__class__ = record.__class__
-        copy.__dict__.update(record.__dict__)
+        record_copy = _copy.copy(record)
         msg = record.msg if isinstance(record.msg, str) else str(record.msg)
-        copy.msg = style + msg + colorama.Style.RESET_ALL
-        record = copy
+        record_copy.msg = style + msg + colorama.Style.RESET_ALL
         # Delegate the remaining formatting to the base formatter.
-        return Formatter.format(self, record)
+        return Formatter.format(self, record_copy)
+
+
+def arm_parent_watchdog(poll_seconds: float = 2.0) -> None:
+    """Arm a daemon-thread watchdog that terminates this worker when its parent dies.
+
+    Captures the current parent PID and polls ``os.getppid()`` every
+    ``poll_seconds``. When the PID changes — i.e. the parent died and the OS
+    reparented the worker to init/launchd — the worker calls ``os._exit(0)``
+    instead of waiting on a now-broken pipe.
+
+    Why: :class:`concurrent.futures.ProcessPoolExecutor` workers are not
+    daemons, so when the parent is SIGKILL'd or its controlling terminal is
+    closed, the workers keep running a CPU-bound chunk (overlap rasterization,
+    EAO subcompute, etc.) until they try to send the result back. That can
+    take many minutes per chunk and produces orphaned 100%-CPU workers
+    visible in ``htop`` long after the user thinks ``vot`` is done.
+
+    Safe to call multiple times; each call starts an additional daemon thread
+    but they share the same exit condition.
+    """
+    import threading
+
+    parent_pid = os.getppid()
+
+    def _watch() -> None:
+        while True:
+            if os.getppid() != parent_pid:
+                os._exit(0)
+            time.sleep(poll_seconds)
+
+    threading.Thread(target=_watch, name="parent-watchdog", daemon=True).start()
 
 
 class ThreadPoolExecutor(futures.ThreadPoolExecutor):
     """Thread pool executor with a shutdown method that waits for all threads to
     finish."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: typing.Any, **kwargs: typing.Any) -> None:
         """Initializes the thread pool executor."""
         super().__init__(*args, **kwargs)
         #self._work_queue = Queue.Queue(maxsize=maxsize)
 
-    def shutdown(self, wait=True):
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
         """Shuts down the thread pool executor. If wait is True, waits for all threads
         to finish.
 
         :param wait: Wait for all threads to finish. Defaults to True.
-        :type wait: bool, optional
+        :param cancel_futures: Cancel pending futures. Accepted for parent-class
+            compatibility; pending work items are always cancelled here.
         """
         import queue
+        del cancel_futures
         with self._shutdown_lock:
             self._shutdown = True
             try:
@@ -514,7 +534,7 @@ class ThreadPoolExecutor(futures.ThreadPoolExecutor):
                     item.future.cancel()
             except queue.Empty:
                 pass
-            self._work_queue.put(None)
+            self._work_queue.put(None)  # type: ignore[arg-type]
         if wait:
             for t in self._threads:
                 t.join()
@@ -522,7 +542,7 @@ class ThreadPoolExecutor(futures.ThreadPoolExecutor):
 class Timer(object):
     """Simple timer class for measuring elapsed time."""
 
-    def __init__(self, name=None):
+    def __init__(self, name: str | None = None) -> None:
         """Initializes the timer.
 
         :param name: Name of the timer. Defaults to None.
@@ -530,11 +550,12 @@ class Timer(object):
         """
         self.name = name
 
-    def __enter__(self):
+    def __enter__(self) -> None:
         """Starts the timer."""
         self._tstart = time.time()
 
-    def __exit__(self, type, value, traceback):
+    def __exit__(self, type: type[BaseException] | None, value: BaseException | None,
+                 traceback: TracebackType | None) -> None:
         """Stops the timer and prints the elapsed time."""
         elapsed = time.time() - self._tstart
         if self.name:
@@ -545,16 +566,16 @@ class Timer(object):
 class Registry(ClassRegistry):
     """A class registry for storing classes with a fallback to entry point registry."""
 
-    def __init__(self, group: str, attr_name: typing.Optional[str] = None) -> None:
+    def __init__(self, group: str, attr_name: str | None = None) -> None:
         """Initializes the registry.
 
         :param group: The name of the entry point group that will be used to load new classes.
         :type group: str
         :param attr_name: If set, the registry will "brand" each class with its corresponding registry key. Defaults to None.
-        :type attr_name: typing.Optional[str], optional
+        :type attr_name: str | None, optional
         """
         from class_registry.entry_points import EntryPointClassRegistry
-        super(Registry, self).__init__(group, attr_name)
+        super(Registry, self).__init__(attr_name=attr_name)
         
         import vot
         import json
@@ -578,18 +599,17 @@ class Registry(ClassRegistry):
         # By default use the entry point mechanism
         self._entry_point = EntryPointClassRegistry(group="vot_" + group, attr_name=attr_name)
 
-    def __missing__(self, key: str) -> object:
+    def __missing__(self, key: typing.Hashable) -> type:
         """Attempts to load a class from the entry point registry if it is not found in
         the local registry.
 
         :param key: Key of the class to load
-        :type key: str
 
-        :returns: Loaded class or None if not found
-        :rtype: object"""
+        :raises KeyError: If the key is not found in the entry point registry.
+        :returns: Loaded class."""
         return self._entry_point.get_class(key)
  
-    def get_class(self, key: typing.Hashable):
+    def get_class(self, key: typing.Hashable) -> type:
         """Returns the class associated with the specified key. If the class is not
         found in the local registry, it is loaded from the entry point registry.
 
@@ -603,23 +623,23 @@ class Registry(ClassRegistry):
         except KeyError:
             return self._entry_point.get_class(key)
  
-    def keys(self):
-        """Returns an iterator over the registered classes.
+    def keys(self) -> set[typing.Hashable]:
+        """Returns the set of registered keys (local registry and entry points).
 
-        :returns: Iterator over the registered classes
-        :rtype: Iterator"""
+        :returns: Set of registered keys
+        :rtype: set"""
         items = {key for key in self._entry_point.keys()}
         items.update({key for key in super().keys()})
 
         return items
  
-    def classes(self):
+    def classes(self) -> typing.Iterator[type]:
         """Returns an iterator over the registered classes.
 
         :returns: Iterator over the registered classes
         :rtype: Iterator"""
 
-        items = {}
+        items: dict[typing.Hashable, type] = {}
         for key in self._entry_point.keys():
             items[key] = self._entry_point.get_class(key)
             
@@ -630,24 +650,28 @@ class Registry(ClassRegistry):
      
         return iter(items.values())
 
-    def items(self):
+    def items(self) -> typing.Iterator[tuple[typing.Hashable, type]]:
         return zip(self.keys(), self.classes())
 
 class ObjectResolver(object):
-    
-    
-    def __init__(self, registry: ClassRegistry, extra_arguments: typing.Optional[typing.Callable] = None,
-                class_check: typing.Optional[typing.Callable] = None, object_check: typing.Optional[typing.Callable] = None):
+    """Resolves objects from a registry by name, instantiating them with optional checks.
+
+    A name is looked up in the registry; if absent it is imported as a class path. Optional
+    ``class_check`` / ``object_check`` callables validate the class and the instance against
+    the resolution context."""
+
+    def __init__(self, registry: ClassRegistry, extra_arguments: typing.Callable | None = None,
+                class_check: typing.Callable | None = None, object_check: typing.Callable | None = None) -> None:
         """Initializes the object resolver.
 
         :param registry: Registry of classes
         :type registry: ClassRegistry
         :param extra_arguments: Extra arguments to pass to the class constructor
-        :type extra_arguments: typing.Optional[typing.Callable], optional
+        :type extra_arguments: typing.Callable | None, optional
         :param class_check: Function to check if the class is compatible with the purpose
-        :type class_check: typing.Optional[typing.Callable], optional
+        :type class_check: typing.Callable | None, optional
         :param object_check: Function to check if the object is compatible with the purpose
-        :type object_check: typing.Optional[typing.Callable], optional
+        :type object_check: typing.Callable | None, optional
         """
         self._registry = registry
         self._extra_arguments = extra_arguments
@@ -656,32 +680,29 @@ class ObjectResolver(object):
     
     
     
-    def __call__(self, typename, context, **kwargs):
+    def __call__(self, typename: str, context: typing.Any, **kwargs: typing.Any) -> typing.Any:
         """Resolve an object from a string. If the object is not registered, it is
         imported as a class and instantiated with the provided arguments.
 
-        :param typename: Name of the analysis
-        :type typename: str
-        :param context: Context of the resolver
-        :type context: Attributee
+        :param typename: Registry key or importable class path of the object.
+        :param context: Context of the resolver, passed to the optional checks.
 
-        :returns: Resolved analysis
-        :rtype: Analysis"""
+        :returns: The resolved object."""
 
         if self._extra_arguments:
             kwargs.update(self._extra_arguments(context))
 
         if typename in self._registry:
-            analysis = self._registry.get(typename, **kwargs)
+            obj = self._registry.get(typename, **kwargs)
             if self._class_check:
-                assert self._class_check(analysis, context)
+                assert self._class_check(obj, context)
         else:
-            analysis_class = import_class(typename)
+            obj_class = import_class(typename)
             if self._class_check:
-                assert self._class_check(analysis, context)
-            analysis = analysis_class(**kwargs)
+                assert self._class_check(obj_class, context)
+            obj = obj_class(**kwargs)
 
         if self._object_check:
-            assert self._object_check(analysis, context)
+            assert self._object_check(obj, context)
 
-        return analysis
+        return obj

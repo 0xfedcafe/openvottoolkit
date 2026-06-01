@@ -2,24 +2,28 @@
 
 import os
 import fnmatch
-from typing import List
+from collections.abc import Iterator
+from typing import IO, Any, TYPE_CHECKING, overload
 from copy import copy
-from vot.region import Region, Special, calculate_overlap, is_special
+from vot.region import Region, Special, SpecialCode, calculate_overlap, is_special
 from vot.region.io import write_trajectory, read_trajectory
 from vot.utilities import to_string
+
+if TYPE_CHECKING:
+    from vot.workspace.storage import Storage
+
 
 class Results(object):
     """Generic results interface for storing and retrieving results."""
 
-    def __init__(self, storage: "vot.workspace.Storage"):
+    def __init__(self, storage: "Storage") -> None:
         """Creates a new results interface.
 
         :param storage: Storage interface
-        :type storage: Storage
         """
         self._storage = storage
 
-    def exists(self, name):
+    def exists(self, name: str) -> bool:
         """Returns true if the given file exists in the results storage.
 
         :param name: File name
@@ -29,7 +33,7 @@ class Results(object):
         :rtype: bool"""
         return self._storage.isdocument(name)
 
-    def read(self, name):
+    def read(self, name: str) -> IO[Any] | None:
         """Returns a file handle for reading the given file from the results storage.
 
         :param name: File name
@@ -41,7 +45,7 @@ class Results(object):
             return self._storage.read(name, binary=True)
         return self._storage.read(name)
 
-    def write(self, name: str):
+    def write(self, name: str) -> IO[Any]:
         """Returns a file handle for writing the given file to the results storage.
 
         :param name: File name
@@ -53,7 +57,7 @@ class Results(object):
             return self._storage.write(name, binary=True)
         return self._storage.write(name)
 
-    def find(self, pattern):
+    def find(self, pattern: str) -> list[str]:
         """Returns a list of files matching the given pattern in the results storage.
 
         :param pattern: Pattern
@@ -66,10 +70,6 @@ class Results(object):
     
 class Trajectory(object):
     """Trajectory class for storing and retrieving tracker trajectories."""
-
-    UNKNOWN = 0
-    INITIALIZATION = 1
-    FAILURE = 2
 
     @classmethod
     def exists(cls, results: Results, name: str) -> bool:
@@ -120,7 +120,7 @@ class Trajectory(object):
         :returns: Trajectory
         :rtype: Trajectory"""
 
-        def parse_float(line):
+        def parse_float(line: str) -> float | None:
             """Parses a float from a line.
 
             :param line: Line
@@ -132,11 +132,15 @@ class Trajectory(object):
                 return None
             return float(line.strip())
 
-        if results.exists(name + ".txt"):
-            with results.read(name + ".txt") as fp:
+        if results.exists(name + ".bin"):
+            fp = results.read(name + ".bin")
+            assert fp is not None, "read() returned None despite exists() returning True"
+            with fp:
                 regions = read_trajectory(fp)
-        elif results.exists(name + ".bin"):
-            with results.read(name + ".bin") as fp:
+        elif results.exists(name + ".txt"):
+            fp = results.read(name + ".txt")
+            assert fp is not None, "read() returned None despite exists() returning True"
+            with fp:
                 regions = read_trajectory(fp)
         else:
             raise FileNotFoundError("Trajectory data not found: {}".format(name))
@@ -144,8 +148,10 @@ class Trajectory(object):
         trajectory = Trajectory(len(regions))
         trajectory._regions = regions
 
-        for propertyfile in results.find(name + "*.value"):
-            with results.read(propertyfile) as filehandle:
+        for propertyfile in results.find(name + "_*.value"):
+            filehandle = results.read(propertyfile)
+            assert filehandle is not None, "read() returned None despite find() reporting the file"
+            with filehandle:
                 propertyname = os.path.splitext(os.path.basename(propertyfile))[0][len(name)+1:]
                 lines = list(filehandle.readlines())
                 try:
@@ -155,24 +161,24 @@ class Trajectory(object):
 
         return trajectory
 
-    def __init__(self, length: int):
+    def __init__(self, length: int) -> None:
         """Creates a new trajectory of the given length.
 
         :param length: Trajectory length
         :type length: int
         """
-        self._regions = [Special(Trajectory.UNKNOWN)] * length
-        self._properties = dict()
+        # ``Special`` is a subclass of ``Region`` — type the list with the
+        # general element type so subsequent assignments of other ``Region``
+        # subclasses (``Rectangle`` etc.) are accepted.
+        self._regions: list[Region] = [Special(SpecialCode.UNKNOWN)] * length
+        self._properties: dict = dict()
 
-    def set(self, frame: int, region: Region, properties: dict = None):
+    def set(self, frame: int, region: Region, properties: dict | None = None) -> None:
         """Sets the region for the given frame.
 
         :param frame: Frame index
-        :type frame: int
         :param region: Region
-        :type region: Region
         :param properties: Frame properties. Defaults to None.
-        :type properties: dict, optional
 
         :raises IndexError: Frame index out of bounds"""
         if frame < 0 or frame >= len(self._regions):
@@ -184,7 +190,7 @@ class Trajectory(object):
             properties = dict()
 
         for k, v in properties.items():
-            if not k in self._properties:
+            if k not in self._properties:
                 self._properties[k] = [None] * len(self._regions)
             self._properties[k][frame] = v
 
@@ -192,32 +198,80 @@ class Trajectory(object):
         """Returns the region for the given frame.
 
         :param frame: Frame index
-        :type frame: int
 
         :raises IndexError: Frame index out of bounds
-        :returns: Region
-        :rtype: Region"""
+        :returns: Region"""
         if frame < 0 or frame >= len(self._regions):
             raise IndexError("Frame index out of bounds")
         return self._regions[frame]
 
-    def regions(self) -> List[Region]:
-        """Returns the list of regions.
-
-        :returns: List of regions
-        :rtype: List[Region]"""
+    def regions(self) -> list[Region]:
+        """Returns the list of regions."""
         return copy(self._regions)
 
-    def properties(self, frame: int = None) -> dict:
-        """Returns the properties for the given frame or all properties if frame is
-        None.
+    def markers(self) -> tuple[list[int], list[int], list[int]]:
+        """Returns the ascending frame indices of every INITIALIZATION, FAILURE and
+        CRASH marker as ``(init, failure, crash)``.
+
+        Both FAILURE and CRASH terminate a tracking run for EAO purposes; only FAILURE
+        is a tracking failure (low-overlap loss) while CRASH is a tracker process
+        failure. For the robustness / crash counts use :meth:`failures` / :meth:`crashes`,
+        which apply run-pairing semantics rather than reporting raw markers.
+
+        :returns: ``(init_idxs, failure_idxs, crash_idxs)``."""
+        init_idxs: list[int] = []
+        failure_idxs: list[int] = []
+        crash_idxs: list[int] = []
+        for i, region in enumerate(self._regions):
+            if is_special(region, SpecialCode.INITIALIZATION):
+                init_idxs.append(i)
+            elif is_special(region, SpecialCode.FAILURE):
+                failure_idxs.append(i)
+            elif is_special(region, SpecialCode.CRASH):
+                crash_idxs.append(i)
+        return init_idxs, failure_idxs, crash_idxs
+
+    def failures(self) -> list[int]:
+        """Returns the frame indices of counted tracking failures.
+
+        A counted failure is a FAILURE marker that terminates an open run, i.e. one
+        preceded by an INITIALIZATION not already paired with an earlier failure, so
+        ``len(trajectory.failures())`` is the VOT robustness count. A CRASH does not
+        close a run here; crashes are reported separately by :meth:`crashes`.
+
+        :returns: Ascending frame indices of the counted tracking failures."""
+        frames: list[int] = []
+        in_run = False
+        for i, region in enumerate(self._regions):
+            if is_special(region, SpecialCode.INITIALIZATION):
+                in_run = True
+            elif is_special(region, SpecialCode.FAILURE) and in_run:
+                frames.append(i)
+                in_run = False
+        return frames
+
+    def crashes(self) -> list[int]:
+        """Returns the frame indices of every CRASH marker.
+
+        A crash is written when the runtime raises a tracker exception (a process
+        crash or timeout) during initialize or update. Orphan crashes during a reinit
+        attempt count too — the tracker failed to produce output in either case.
+
+        :returns: Ascending frame indices of the CRASH markers."""
+        return [i for i, region in enumerate(self._regions) if is_special(region, SpecialCode.CRASH)]
+
+    @overload
+    def properties(self, frame: None = ...) -> tuple[str, ...]: ...
+    @overload
+    def properties(self, frame: int) -> dict[str, Any]: ...
+    def properties(self, frame: int | None = None) -> tuple[str, ...] | dict[str, Any]:
+        """Returns the properties for the given frame, or a tuple of property names
+        when ``frame`` is ``None``.
 
         :param frame: Frame index. Defaults to None.
-        :type frame: int, optional
 
         :raises IndexError: Frame index out of bounds
-        :returns: Properties
-        :rtype: dict"""
+        :returns: Properties dict for a frame, or tuple of property names."""
 
         if frame is None:
             return tuple(self._properties.keys())
@@ -225,23 +279,23 @@ class Trajectory(object):
         if frame < 0 or frame >= len(self._regions):
             raise IndexError("Frame index out of bounds")
 
-        return {k : v[frame] for k, v in self._properties.items() if not v[frame] is None}
+        return {k: v[frame] for k, v in self._properties.items() if v[frame] is not None}
 
-    def __len__(self):
+    def __len__(self) -> int:
         """Returns the length of the trajectory.
 
         :returns: Length
         :rtype: int"""
         return len(self._regions)
     
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Region]:
         """Returns an iterator over the regions.
 
         :returns: Iterator
         :rtype: Iterator"""
         return iter(self._regions)
 
-    def write(self, results: Results, name: str):
+    def write(self, results: Results, name: str) -> None:
         """Writes the trajectory to the results storage.
 
         :param results: Results storage
@@ -264,18 +318,18 @@ class Trajectory(object):
                 fp.writelines([to_string(e) + "\n" for e in v])
 
 
-    def equals(self, trajectory: 'Trajectory', check_properties: bool = False, overlap_threshold: float = 0.99999):
+    def equals(self, trajectory: 'Trajectory', check_properties: bool = False, overlap_threshold: float = 0.99999) -> bool:
         """Returns true if the trajectories are equal.
 
-        :param trajectory: _description_
+        :param trajectory: The other trajectory to compare against.
         :type trajectory: Trajectory
-        :param check_properties: _description_. Defaults to False.
+        :param check_properties: Also require per-frame properties to match. Defaults to False.
         :type check_properties: bool, optional
-        :param overlap_threshold: _description_. Defaults to 0.99999.
+        :param overlap_threshold: Minimum per-region overlap to treat two regions as equal. Defaults to 0.99999.
         :type overlap_threshold: float, optional
 
-        :returns: _description_
-        :rtype: _type_"""
+        :returns: True if the trajectories are equal, False otherwise.
+        :rtype: bool"""
         if not len(self) == len(trajectory):
             return False
 

@@ -11,7 +11,7 @@ from vot.tracker import is_valid_identifier
 from vot.stack import resolve_stack
 from vot.workspace import WorkspaceException
 
-def migrate_matlab_workspace(directory: str):
+def migrate_matlab_workspace(directory: str) -> None:
     """Migrates a legacy matlab workspace to the new format.
 
     :param directory: The directory of the workspace.
@@ -24,7 +24,7 @@ def migrate_matlab_workspace(directory: str):
 
     logger.info("Attempting to migrate workspace in %s", directory)
 
-    def scan_text(pattern, content, default=None):
+    def scan_text(pattern: str, content: str, default: str | None = None) -> str | None:
         """Scans the text for a pattern and returns the first match.
 
         :param pattern: The pattern to search for.

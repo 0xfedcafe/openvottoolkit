@@ -1,8 +1,7 @@
 """This module contains functions for generating LaTeX documents with results."""
 import io
-import tempfile
 import datetime
-from typing import List
+from typing import Any
 
 from pylatex.base_classes import Container
 from pylatex.package import Package
@@ -21,8 +20,13 @@ TRACKER_GROUP = "default"
 class Chunk(Container):
     """A container that does not add a newline after the content."""
 
-    def dumps(self):
-        """Returns the LaTeX representation of the container."""
+    def dumps(self) -> str:  # type: ignore[override]
+        """Returns the LaTeX representation of the container.
+
+        The base ``LatexObject.dumps`` signature is more permissive (returns
+        ``str | None``); ``Chunk`` always materialises its content so the
+        override narrows to ``str``.
+        """
         return self.dumps_content()
 
 def strip_comments(src, wrapper=True):
@@ -57,23 +61,26 @@ def generate_symbols(container, trackers):
 
     container.append(Command("makeatother"))
 
-def generate_latex_document(trackers: List[Tracker], sequences: List[Sequence], reports, storage: Storage, multipart=True, metadata: dict = None) -> str:
-    """Generates a LaTeX document with the results. The document is returned as a
-    string. If build is True, the document is compiled and the PDF is returned.
+def generate_latex_document(
+    trackers: list[Tracker],
+    sequences: list[Sequence],
+    reports: dict[str, list[Any]],
+    storage: Storage,
+    multipart: bool = True,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Generates a LaTeX document with the results and writes it via ``storage``.
 
     :param trackers: List of trackers.
-    :type trackers: list
     :param sequences: List of sequences.
-    :type sequences: list
-    :param reports: List of results tuples.
-    :type reports: list
-    :param storage: Storage object.
-    :type storage: Storage
-    :param multipart: If True, the document is split into multiple files.
-    :type multipart: bool
-    :param metadata: Metadata dictionary.
-    :type metadata: dict
-    """
+    :param reports: Mapping from section name to a list of report items
+        (``Table`` / ``Plot``).
+    :param storage: Storage object that the rendered ``.tex`` (and optional
+        auxiliary plot files) are written to.
+    :param multipart: If ``True``, the document is split into multiple files.
+    :param metadata: Reserved for future metadata propagation; currently unused."""
+    del metadata  # reserved
+    del sequences  # not consumed here (reports already contain per-sequence info)
 
     order_marks = {1: "first", 2: "second", 3: "third"}
 
@@ -153,9 +160,6 @@ def generate_latex_document(trackers: List[Tracker], sequences: List[Sequence], 
                     else:
                         container.append(insert_figure(plot))
                     container.add_caption(plot.identifier)
-
-                logger.debug("Saving plot %s", item.identifier)
-                item.save(key + "_" + item.identifier + '.pdf', "PDF")
             else:
                 logger.warning("Unsupported report item type %s", item)
 

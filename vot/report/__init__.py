@@ -7,11 +7,12 @@ import threading
 import datetime
 import collections
 import collections.abc
-import sys
+import types
 from asyncio import wait, ensure_future
 from asyncio.futures import wrap_future
 
 import numpy as np
+import numpy.typing as npt
 import yaml
 
 from matplotlib.figure import Figure
@@ -22,66 +23,120 @@ from attributee import Attributee, Object, Nested, String, Callable, Integer, Li
 
 from vot import __version__ as version
 from vot import get_logger
-from vot.dataset import Sequence, FrameList
+from vot.dataset import Dataset, Sequence, FrameList
 from vot.tracker import Tracker
-from vot.analysis import Axes
+from vot.utilities.draw import Color
 from vot.utilities import class_fullname
 from vot.utilities.data import Grid
 from vot.utilities import Registry, ObjectResolver
 
+if typing.TYPE_CHECKING:
+    from vot.experiment import Experiment
+    from vot.stack import Stack
+    from vot.workspace import Workspace
+    from vot.workspace.storage import Storage
+    from vot.analysis import Analysis
+
 Table = collections.namedtuple("Table", ["header", "data", "order"])
+
+AxisLimit = float | None
+AxisLimits = tuple[AxisLimit, AxisLimit] | None
+PlotOutput = str | typing.IO[typing.Any]
+VideoOutput = str | typing.IO[bytes]
+AxesRect = tuple[float, float, float, float]
+
 
 class Plot(object):
     """Base class for all plots."""
 
-    def __init__(self, identifier: str, xlabel: str, ylabel: str,
-        xlimits: typing.Tuple[float, float], ylimits: typing.Tuple[float, float], trait = None):
+    def __init__(self, identifier: str, xlabel: str | None, ylabel: str | None,
+        xlimits: AxisLimits, ylimits: AxisLimits, trait: str | None = None) -> None:
         """Initializes the plot.
 
         :param identifier: The identifier of the plot.
-        :type identifier: str
-        :param xlabel: The label of the x axis.
-        :type xlabel: str
-        :param ylabel: The label of the y axis.
-        :type ylabel: str
+        :param xlabel: Optional label of the x axis (``None`` leaves the axis unlabeled).
+        :param ylabel: Optional label of the y axis (``None`` leaves the axis unlabeled).
         :param xlimits: The limits of the x axis.
-        :type xlimits: tuple
         :param ylimits: The limits of the y axis.
-        :type ylimits: tuple
         :param trait: The trait of the plot.
-        :type trait: str
         """
 
         self._identifier = identifier
+        self._xlimits = xlimits
+        self._ylimits = ylimits
 
         self._manager = StyleManager.default()
 
         self._figure, self._axes = self._manager.make_figure(trait)
 
-        self._axes.xaxis.set_label_text(xlabel)
-        self._axes.yaxis.set_label_text(ylabel)
+        if xlabel is not None:
+            self._axes.xaxis.set_label_text(xlabel)
+        if ylabel is not None:
+            self._axes.yaxis.set_label_text(ylabel)
 
-        if not xlimits is None and not any([x is None for x in xlimits]):
-            self._axes.set_xlim(xlimits)
-            self._axes.autoscale(False, axis="x")
-        if not ylimits is None and not any([y is None for y in ylimits]):
-            self._axes.set_ylim(ylimits)
-            self._axes.autoscale(False, axis="y")
+        self._apply_axis_limits()
 
-    def __call__(self, key, data):
+    @staticmethod
+    def _needs_autoscale(limits: AxisLimits) -> bool:
+        """Returns true if at least one side of an axis should be auto-scaled."""
+        return limits is None or limits[0] is None or limits[1] is None
+
+    def _apply_axis_limit(self, axis: str, limits: AxisLimits) -> None:
+        """Apply complete or partial axis limits to a Matplotlib axis."""
+        if limits is None:
+            return
+
+        lower, upper = limits
+        if lower is None and upper is None:
+            return
+
+        if axis == "x":
+            current_lower, current_upper = self._axes.get_xlim()
+            self._axes.set_xlim(
+                left=current_lower if lower is None else lower,
+                right=current_upper if upper is None else upper,
+            )
+            if lower is not None and upper is not None:
+                self._axes.autoscale(False, axis="x")
+        else:
+            current_lower, current_upper = self._axes.get_ylim()
+            self._axes.set_ylim(
+                bottom=current_lower if lower is None else lower,
+                top=current_upper if upper is None else upper,
+            )
+            if lower is not None and upper is not None:
+                self._axes.autoscale(False, axis="y")
+
+    def _apply_axis_limits(self) -> None:
+        """Apply configured limits while preserving auto-scaling for open bounds."""
+        autoscale_x = self._needs_autoscale(self._xlimits)
+        autoscale_y = self._needs_autoscale(self._ylimits)
+
+        if autoscale_x:
+            self._axes.autoscale(enable=True, axis="x")
+        if autoscale_y:
+            self._axes.autoscale(enable=True, axis="y")
+        if autoscale_x or autoscale_y:
+            self._axes.autoscale_view(scalex=autoscale_x, scaley=autoscale_y)
+
+        self._apply_axis_limit("x", self._xlimits)
+        self._apply_axis_limit("y", self._ylimits)
+
+    def __call__(self, key: typing.Any, data: typing.Any) -> None:
         """Draws the data on the plot."""
         self.draw(key, data)
+        self._apply_axis_limits()
 
-    def draw(self, key, data):
+    def draw(self, key: typing.Any, data: typing.Any) -> None:
         """Draws the data on the plot."""
         raise NotImplementedError
     
     @property
-    def axes(self) -> Axes:
+    def axes(self) -> PlotAxes:
         """Returns the axes of the plot."""
         return self._axes
 
-    def save(self, output: str, fmt: str):
+    def save(self, output: PlotOutput, fmt: str) -> None:
         """Saves the plot to a file.
 
         :param output: The output file.
@@ -92,14 +147,14 @@ class Plot(object):
         self._figure.savefig(output, format=fmt, bbox_inches='tight', transparent=True)
 
     @property
-    def identifier(self):
+    def identifier(self) -> str:
         """Returns the identifier of the plot."""
         return self._identifier
 
 class Video(object):
     """Base class for all videos."""
 
-    def __init__(self, identifier: str, frames: FrameList, fps: int = 30, trait = None):
+    def __init__(self, identifier: str, frames: FrameList, fps: int = 30, trait: str | None = None) -> None:
         """Initializes the video object.
 
         :param identifier: The identifier of the video.
@@ -117,63 +172,124 @@ class Video(object):
         self._fps = fps
         self._manager = StyleManager.default()
 
-    def __call__(self, frame: int, key, data):
+    def __call__(self, frame: int, key: typing.Any, data: typing.Any) -> None:
         """Draws the data on the frame."""
         self.draw(frame, key, data)
 
-    def draw(self, frame: int, key, data):
+    def draw(self, frame: int, key: typing.Any, data: typing.Any) -> None:
         """Draws the data on the plot."""
         raise NotImplementedError
 
-    def render(self, frame: int):
+    def render(self, frame: int) -> npt.NDArray[np.uint8]:
         """Renders the frame and returns it as a NumPy array."""
         raise NotImplementedError
 
-    def save(self, output: str, fmt: str):
+    def save(self, output: VideoOutput, fmt: str) -> None:
         import tempfile
         import shutil
         import os
+        import importlib
         from .video import VideoWriterScikitH264, VideoWriterOpenCV
+        from . import video as _video
 
+        # Ordered preference: try the higher-quality H.264 backend first, fall
+        # back to OpenCV (mp4v) when scikit-video / ffmpeg is missing **or**
+        # when scikit-video raises at runtime (e.g. unmaintained 1.1.x breaks
+        # against numpy >= 2.0 where ``ndarray.tostring`` was removed).
         supported_mappings = {
-            "mp4": VideoWriterScikitH264,
-            "avi": VideoWriterOpenCV
+            "mp4": [
+                (VideoWriterScikitH264, "skvideo.io"),
+                (VideoWriterOpenCV, "cv2"),
+            ],
+            "avi": [
+                (VideoWriterOpenCV, "cv2"),
+            ],
         }
 
         if not fmt in supported_mappings:
             raise ValueError("Unsupported video format: {}".format(fmt))
 
-        if not isinstance(output, str):
+        candidates: list[type] = []
+        missing: list[str] = []
+        for candidate, module in supported_mappings[fmt]:
+            # A backend that already failed at runtime in this process is not retried;
+            # re-probing it (e.g. broken scikit-video) wastes an ffmpeg spawn per video.
+            if candidate in _video._RUNTIME_BROKEN_WRITERS:
+                continue
+            try:
+                importlib.import_module(module)
+            except ImportError:
+                missing.append(module)
+                continue
+            candidates.append(candidate)
+
+        if not candidates:
+            raise ImportError(
+                "No usable {} writer available. Install one of: {}.".format(
+                    fmt, ", ".join(missing) or "a working video backend")
+            )
+
+        if isinstance(output, str):
+            tempname = output
+            output_handle = None
+        else:
             fd, tempname = tempfile.mkstemp(prefix="video_", suffix=".{}".format(fmt))
             os.close(fd)
-        else: 
-            tempname = output
+            output_handle = output
 
-        writer = supported_mappings[fmt](tempname, self._fps)
+        last_error: BaseException | None = None
+        try:
+            failed_before_success: list[type] = []
+            for attempt, writer_cls in enumerate(candidates):
+                # Each attempt writes into a clean file. Remove a partial file
+                # left behind by an earlier attempt before trying the next backend.
+                if os.path.exists(tempname):
+                    os.remove(tempname)
+                writer = writer_cls(tempname, self._fps)
+                try:
+                    try:
+                        for i in range(0, len(self._frames)):
+                            writer(self.render(i))
+                    finally:
+                        writer.close()
+                except Exception as exc:
+                    last_error = exc
+                    failed_before_success.append(writer_cls)
+                    get_logger().warning(
+                        "Video writer %s failed (%s); trying next backend",
+                        writer_cls.__name__, exc,
+                    )
+                    continue
+                last_error = None
+                # A backend that failed only to be replaced by a working fallback is
+                # reliably broken in this environment; skip it for the remaining videos.
+                _video._RUNTIME_BROKEN_WRITERS.update(failed_before_success)
+                break
 
-        for i in range(0, len(self._frames)):
-            writer(self.render(i))
+            if last_error is not None:
+                raise last_error
 
-        writer.close()
+            if output_handle is None:
+                return
 
-        if tempname == output:
-            return
-        
-        shutil.copyfileobj(open(tempname, 'rb'), output)
-        os.remove(tempname)
+            with open(tempname, 'rb') as source:
+                shutil.copyfileobj(source, output_handle)
+        finally:
+            if output_handle is not None and os.path.exists(tempname):
+                os.remove(tempname)
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self._frames)
 
     @property
-    def identifier(self):
+    def identifier(self) -> str:
         """Returns the identifier of the plot."""
         return self._identifier
 
 class ScatterPlot(Plot):
     """A scatter plot."""
 
-    def draw(self, key, data):
+    def draw(self, key, data) -> None:
         """Draws the data on the plot."""
         if data is None or len(data) != 2:
             return
@@ -184,7 +300,7 @@ class ScatterPlot(Plot):
 class LinePlot(Plot):
     """A line plot."""
 
-    def draw(self, key, data):
+    def draw(self, key, data) -> None:
         """Draws the data on the plot."""
         if data is None or len(data) < 1:
             return
@@ -204,11 +320,11 @@ class LinePlot(Plot):
 
 class ObjectVideo(Video):
 
-    def __init__(self, identifier: str, frames: FrameList, fps=10, trait=None):
+    def __init__(self, identifier: str, frames: FrameList, fps: int = 10, trait: str | None = None) -> None:
         super().__init__(identifier, frames, fps=fps, trait=trait)
         self._regions = {}
 
-    def draw(self, frame, key, data):
+    def draw(self, frame: int, key, data) -> None:
         """Draws the data on the frame."""
         from vot.region import Region
         assert isinstance(data, Region)
@@ -218,13 +334,22 @@ class ObjectVideo(Video):
 
         self._regions[key][frame] = data
 
-    def render(self, frame: int):
+    def _load_image(self, frame: int) -> npt.NDArray[np.uint8]:
+        """Loads the source image for the given frame index.
+
+        Separated from :meth:`render` so subclasses can cache decoded frames."""
+        image = self._frames.frame(frame).image()
+        if image is None:
+            raise ValueError(f"Frame {frame} has no image data")
+        return image
+
+    def render(self, frame: int) -> npt.NDArray[np.uint8]:
         """Renders the frame and returns it as an array."""
         from vot.utilities.draw import ImageDrawHandle
 
         assert frame >= 0 and frame < len(self)
 
-        handle = ImageDrawHandle(self._frames.frame(frame).image())
+        handle = ImageDrawHandle(self._load_image(frame))
 
         for key, regions in self._regions.items():
             if regions[frame] is None:
@@ -239,12 +364,12 @@ class ObjectVideo(Video):
 
 
 
-def generate_serialized(trackers: typing.List[Tracker], sequences: typing.List[Sequence], results, storage: "Storage", serializer: str, name: str):
+def generate_serialized(trackers: list[Tracker], sequences: list[Sequence], results, storage: "Storage", serializer: str, name: str) -> None:
     """Generates a serialized report of the results."""
 
     from vot.utilities.io import JSONEncoder, YAMLEncoder
 
-    doc = dict()
+    doc: dict[str, typing.Any] = dict()
     doc["toolkit"] = version
     doc["timestamp"] = datetime.datetime.now().isoformat()
     doc["trackers"] = {t.reference : t.describe() for t in trackers}
@@ -253,7 +378,7 @@ def generate_serialized(trackers: typing.List[Tracker], sequences: typing.List[S
     doc["results"] = dict()
 
     for experiment, analyses in results.items():
-        exp = dict(parameters=experiment.dump(), type=class_fullname(experiment))
+        exp: dict[str, typing.Any] = dict(parameters=experiment.dump(), type=class_fullname(experiment))
         exp["results"] = []
         for _, data in analyses.items():
             exp["results"].append(data)
@@ -268,19 +393,19 @@ def generate_serialized(trackers: typing.List[Tracker], sequences: typing.List[S
     else:
         raise RuntimeError("Unknown serializer")
 
-def configure_axes(figure, rect=None, _=None):
+def configure_axes(figure: Figure, rect: AxesRect | None = None, _=None) -> PlotAxes:
     """Configures the axes of the plot."""
 
-    axes = PlotAxes(figure, rect or [0, 0, 1, 1])
+    axes = PlotAxes(figure, (0.0, 0.0, 1.0, 1.0) if rect is None else rect)
 
     figure.add_axes(axes)
 
     return axes
 
-def configure_figure(traits=None):
+def configure_figure(traits: str | None = None) -> Figure:
     """Configures the figure of the plot."""
 
-    args = {}
+    args: dict[str, typing.Any] = {}
     if traits == "ar":
         args["figsize"] = (5, 5)
     elif traits == "eao":
@@ -293,35 +418,35 @@ def configure_figure(traits=None):
 class PlotStyle(object):
     """A style for a plot."""
 
-    def line_style(self, opacity=1):
+    def line_style(self, opacity: float = 1.0) -> dict:
         """Returns the style for a line."""
         raise NotImplementedError
 
-    def point_style(self):
+    def point_style(self) -> dict:
         """Returns the style for a point."""
         raise NotImplementedError
 
-    def region_style(self):
+    def region_style(self) -> dict:
         """Returns the style for a region, used with DrawHandle."""
         raise NotImplementedError
 
-def _get_default_colormap():
-    try:
-        from matplotlib.cm import get_cmap
-        return get_cmap("Set1", 9)
-    except ImportError:
-        #from matplotlib.colors import ListedColormap
-        from matplotlib import colormaps
-        return colormaps["Set1"]
+
+StyleFactory = typing.Callable[[int], PlotStyle]
+AxesFactory = typing.Callable[[Figure, AxesRect | None, str | None], PlotAxes]
+FigureFactory = typing.Callable[[str | None], Figure]
+
+
+def _get_default_colormap() -> colors.Colormap:
+    from matplotlib import colormaps
+    return colormaps["Set1"].resampled(9)
 
 class DefaultStyle(PlotStyle):
     """The default style for a plot."""
 
     colormap = _get_default_colormap()
-    colorcount = 20
     markers = ["o", "v", "<", ">", "^", "8", "*"]
 
-    def __init__(self, number):
+    def __init__(self, number: int) -> None:
         """Initializes the style.
 
         :param number: The number of the style.
@@ -330,38 +455,34 @@ class DefaultStyle(PlotStyle):
         super().__init__()
         self._number = number
 
-    def line_style(self, opacity=1):
+    def _color(self) -> Color:
+        """Returns this style's colormap entry as a :class:`Color`."""
+        return Color.resolve(self.colormap(self._number % self.colormap.N))
+
+    def line_style(self, opacity: float = 1.0) -> dict:
         """Returns the style for a line.
 
         :param opacity: The opacity of the line.
         :type opacity: float
         """
-        color = self.colormap((self._number % self.colormap.N))
+        color = self._color()
         if opacity < 1:
-            color = colors.to_rgba(color, opacity)
-        return dict(linewidth=1, c=color)
+            color = color.with_alpha(opacity)
+        return dict(linewidth=1, c=color.rgba())
 
-    def point_style(self):
-        """Returns the style for a point.
-
-        :param color: The color of the point.
-        :type color: str
-        :param opacity: The opacity of the line.
-        :type opacity: float
-        """
-        color = self.colormap((self._number % self.colormap.N))
+    def point_style(self) -> dict:
+        """Returns the style for a point."""
         marker = DefaultStyle.markers[self._number % len(DefaultStyle.markers)]
-        return dict(marker=marker, c=[color])
+        return dict(marker=marker, c=[self._color().rgba()])
 
-    def region_style(self):
+    def region_style(self) -> dict:
         """Returns the style for a region, used with DrawHandle."""
-        color = self.colormap((self._number % self.colormap.N))
-        return dict(color=color, fill=True)
+        return dict(color=self._color(), fill=True)
 
 class Legend(object):
     """A legend for a plot."""
 
-    def __init__(self, style_factory=DefaultStyle):
+    def __init__(self, style_factory: StyleFactory = DefaultStyle) -> None:
         """Initializes the legend.
 
         :param style_factory: The style factory.
@@ -371,7 +492,7 @@ class Legend(object):
         self._counter = 0
         self._style_factory = style_factory
 
-    def _number(self, key):
+    def _number(self, key) -> int:
         """Returns the number for a key."""
         if not key in self._mapping:
             self._mapping[key] = self._counter
@@ -383,19 +504,19 @@ class Legend(object):
         number = self._number(key)
         return self._style_factory(number)
 
-    def _style(self, number):
+    def _style(self, number: int) -> PlotStyle:
         """Returns the style for a number."""
         raise NotImplementedError
 
-    def keys(self):
+    def keys(self) -> typing.KeysView:
         """Returns the keys of the legend."""
         return self._mapping.keys()
 
-    def figure(self, key):
+    def figure(self, key) -> Figure:
         """Returns a figure for a key."""
         style = self[key]
         figure = Figure(figsize=(0.1, 0.1))  # TODO: hardcoded
-        axes = PlotAxes(figure, [0, 0, 1, 1], yticks=[], xticks=[], frame_on=False)
+        axes = PlotAxes(figure, (0.0, 0.0, 1.0, 1.0), yticks=[], xticks=[], frame_on=False)
         figure.add_axes(axes)
         axes.patch.set_visible(False)
         marker_style = style.point_style()
@@ -429,7 +550,7 @@ class StyleManager(Attributee):
             klass = type(key)
 
         if not klass in self._legends:
-            self._legends[klass] = Legend(self.plots)
+            self._legends[klass] = Legend(typing.cast(StyleFactory, self.plots))
 
         return self._legends[klass]
 
@@ -437,23 +558,25 @@ class StyleManager(Attributee):
         """Gets the plot style for a given key."""
         return self.legend(key)[key]
 
-    def make_axes(self, figure, rect=None, trait=None) -> Axes:
+    def make_axes(self, figure: Figure, rect: AxesRect | None = None, trait: str | None = None) -> PlotAxes:
         """Makes the axes for a given figure."""
-        return self.axes(figure, rect, trait)
+        axes_factory = typing.cast(AxesFactory, self.axes)
+        return axes_factory(figure, rect, trait)
 
-    def make_figure(self, trait=None) -> typing.Tuple[Figure, Axes]:
+    def make_figure(self, trait: str | None = None) -> tuple[Figure, PlotAxes]:
         """Makes the figure for a given trait.
 
         :param trait: The trait for which to make the figure.
         :type trait: str
 
         :returns: A tuple containing the figure and the axes."""
-        figure = self.figure(trait)
+        figure_factory = typing.cast(FigureFactory, self.figure)
+        figure = figure_factory(trait)
         axes = self.make_axes(figure, trait=trait)
 
         return figure, axes
 
-    def __enter__(self):
+    def __enter__(self) -> "StyleManager":
         """Enters the context of the style manager."""
 
         manager = getattr(StyleManager._context, 'style_manager', None)
@@ -465,7 +588,7 @@ class StyleManager(Attributee):
 
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __exit__(self, exc_type: type, exc_value: Exception, traceback: types.TracebackType) -> None:
         """Exits the context of the style manager."""
         manager = getattr(StyleManager._context, 'style_manager', None)
 
@@ -491,21 +614,21 @@ class TrackerSorter(Attributee):
     analysis = String(default=None)
     result = Integer(val_min=0, default=0)
 
-    def __call__(self, experiments: typing.List["Experiment"], trackers: typing.List["Tracker"], sequences: typing.List["Sequence"]):
+    def __call__(self, experiments: list["Experiment"], trackers: list["Tracker"], sequences: list["Sequence"]) -> list[int]:
         """Sorts the trackers.
 
         :param experiments: The experiments.
-        :type experiments: typing.List[Experiment]
+        :type experiments: list[Experiment]
         :param trackers: The trackers.
-        :type trackers: typing.List[Tracker]
+        :type trackers: list[Tracker]
         :param sequences: The sequences.
-        :type sequences: typing.List[Sequence]
+        :type sequences: list[Sequence]
 
         :returns: A list of indices of the trackers in the sorted order."""
         from vot.analysis import AnalysisError
 
         if self.experiment is None or self.analysis is None:
-            return range(len(trackers))
+            return list(range(len(trackers)))
 
         experiment = next(filter(lambda x: x.identifier == self.experiment, experiments), None)
 
@@ -535,18 +658,14 @@ class Report(Attributee):
     Base class for all report generators.
     """
 
-    async def generate(self, experiments, trackers, sequences):
+    async def generate(self, experiments: list["Experiment"], trackers: list["Tracker"], sequences: list["Sequence"]) -> dict[str, typing.Any]:
         raise NotImplementedError()
 
-    async def process(self, analyses, experiment, trackers, sequences):
+    async def process(self, analyses: list["Analysis"], experiment: "Experiment", trackers: list["Tracker"], sequences: list["Sequence"]) -> typing.Iterable[typing.Any]:
 
         sequences = experiment.transform(sequences)
 
-        if sys.version_info >= (3, 3):
-            _Iterable = collections.abc.Iterable
-        else:
-            _Iterable = collections.Iterable
-        if not isinstance(analyses, _Iterable):
+        if not isinstance(analyses, collections.abc.Iterable):
             analyses = [analyses]
 
         futures = []
@@ -567,13 +686,13 @@ class SeparableReport(Report):
     Base class for all separable report generators.
     """
 
-    async def perexperiment(self, experiment, trackers, sequences):
+    async def perexperiment(self, experiment: "Experiment", trackers: list["Tracker"], sequences: list["Sequence"]) -> typing.Any:
         raise NotImplementedError()
 
-    def compatible(self, experiment):
+    def compatible(self, experiment: "Experiment") -> bool:
         raise NotImplementedError()
 
-    async def generate(self, experiments, trackers, sequences):
+    async def generate(self, experiments: list["Experiment"], trackers: list["Tracker"], sequences: list["Sequence"]) -> dict[str, typing.Any]:
 
         futures = []
         texperiments = []
@@ -587,6 +706,9 @@ class SeparableReport(Report):
                 texperiments.append(experiment)
             else:
                 continue
+
+        if len(futures) == 0:
+            return {}
 
         await wait(futures)
 
@@ -606,7 +728,7 @@ class ReportConfiguration(Attributee):
     sort = Nested(TrackerSorter)
     index = List(Object(ObjectResolver(report_registry), subclass=Report), default=[], description="The reports to include.")
 
-def generate_document(workspace: "Workspace", trackers: typing.List[Tracker], format: str, name: str, select_sequences: typing.Optional[typing.List[str]] = None, select_experiments: typing.Optional[typing.List[str]] = None):
+def generate_document(workspace: "Workspace", trackers: list[Tracker], format: str, name: str, select_sequences: list[str] | None = None, select_experiments: list[str] | None = None) -> None:
     """Generate a report for a one or multiple trackers on an experiment stack and a set
     of sequences.
 
@@ -616,13 +738,14 @@ def generate_document(workspace: "Workspace", trackers: typing.List[Tracker], fo
     :param format: The format of the report.
     :param name: The name of the report.
     """
-    from asyncio import ensure_future, get_event_loop, wait
+    import asyncio
+    from asyncio import wait
 
     from vot.analysis import AnalysisProcessor
     from vot.utilities import Progress
     from vot.workspace.storage import Cache
     from vot import config
-    from vot.report.common import StackAnalysesTable, StackAnalysesPlots
+    from vot.report.common import StackAnalysesTable, StackAnalysesPlots, SequenceSpeedPlots
 
     def merge_tree(src, dest):
 
@@ -648,7 +771,8 @@ def generate_document(workspace: "Workspace", trackers: typing.List[Tracker], fo
 
     else:
         from concurrent.futures import ProcessPoolExecutor
-        executor = ProcessPoolExecutor(config.worker_pool_size)
+        from vot.utilities import arm_parent_watchdog
+        executor = ProcessPoolExecutor(config.worker_pool_size, initializer=arm_parent_watchdog)
 
     if not config.persistent_cache:
         from cachetools import LRUCache
@@ -659,16 +783,18 @@ def generate_document(workspace: "Workspace", trackers: typing.List[Tracker], fo
     index = workspace.report.index
     if len(index) == 0:
         # Default report content
-        index = [StackAnalysesTable(), StackAnalysesPlots()]
+        index = [StackAnalysesTable(), StackAnalysesPlots(), SequenceSpeedPlots()]
         
     with workspace.report.style:
 
-        experiments = workspace.stack
-        sequences = workspace.dataset
+        stack = typing.cast("Stack", workspace.stack)
+        stack_experiments = typing.cast(typing.Mapping[str, "Experiment"], stack.experiments)
+        experiments: list["Experiment"] = list(stack)
+        sequences = list(typing.cast(Dataset, workspace.dataset))
         
         if not select_experiments is None:
             assert isinstance(select_experiments, list)
-            experiments = [experiment for name, experiment in workspace.stack.experiments.items() if name in select_experiments]
+            experiments = [experiment for name, experiment in stack_experiments.items() if name in select_experiments]
         if not select_sequences is None:
             assert isinstance(select_sequences, list)
             sequences = [sequence for sequence in sequences if sequence.name in select_sequences]
@@ -680,24 +806,32 @@ def generate_document(workspace: "Workspace", trackers: typing.List[Tracker], fo
         if len(sequences) == 0:
             logger.warning("No sequences selected")
 
+        # ``asyncio.get_event_loop()`` no longer auto-creates a loop in Python 3.12+
+        # and emits the "There is no current event loop in thread 'MainThread'"
+        # warning. Create one explicitly here, install it for the duration of
+        # the report generation, and tear it down in the ``finally`` block.
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
         try:
 
             with AnalysisProcessor(executor, cache) as processor:
-                
+
                 order = workspace.report.sort(experiments, trackers, sequences)
 
                 trackers = [trackers[i] for i in order]
 
-                futures = []
-
-                for report in index:
-                    futures.append(ensure_future(report.generate(experiments, trackers, sequences)))
-
-                loop = get_event_loop()
+                # Schedule ``report.generate`` coroutines on the explicitly-created loop.
+                # ``ensure_future`` / ``create_task`` both bind to the running loop;
+                # we use ``create_task`` on ``loop`` so the binding is explicit.
+                futures = [
+                    loop.create_task(report.generate(experiments, trackers, sequences))
+                    for report in index
+                ]
 
                 progress = Progress("Processing", processor.total)
 
-                def update():
+                def update() -> None:
                     progress.total(processor.total)
                     progress.absolute(processor.total - processor.pending)
                     loop.call_later(1, update)
@@ -717,6 +851,10 @@ def generate_document(workspace: "Workspace", trackers: typing.List[Tracker], fo
         finally:
 
             executor.shutdown(wait=True)
+            try:
+                loop.close()
+            finally:
+                asyncio.set_event_loop(None)
 
         report_storage = workspace.storage.substorage("reports").substorage(name)
 
@@ -734,11 +872,17 @@ def generate_document(workspace: "Workspace", trackers: typing.List[Tracker], fo
                         with storage.write(key + "_" + item.identifier + '.png', binary=True) as out:
                             item.save(out, "PNG")
                     if isinstance(item, Video):
+                        # The HTML document embeds every video itself (as mp4); writing a
+                        # standalone .avi here too would render and encode each video a
+                        # second time for no consumer. Only emit standalone videos for
+                        # formats that do not embed them.
+                        if format == "html":
+                            continue
                         logger.debug("Saving video %s", item.identifier)
                         with storage.write(key + "_" + item.identifier + '.avi', binary=True) as out:
                             item.save(out, "avi")
 
-        metadata = {"Stack": workspace.stack.title}
+        metadata = {"Stack": stack.title}
 
         # Prune empty sections
         reports = {key: section for key, section in reports.items() if len(section) > 0}

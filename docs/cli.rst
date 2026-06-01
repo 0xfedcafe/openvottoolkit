@@ -88,7 +88,7 @@ Run experiment stack for one or more trackers.
 
 Arguments and options:
 
-* `<tracker> [<tracker> ...]` - one or more tracker identifiers,
+* `<tracker> [<tracker> ...]` - one or more tracker references (see `Selecting trackers`_),
 * `--workspace <path>` - workspace directory,
 * `--force`, `-f` - force full rerun,
 * `--persist`, `-p` - continue even when errors are encountered,
@@ -99,6 +99,29 @@ Example:
 .. code-block:: bash
 
 	vot evaluate --workspace ./workspace --force mytracker
+
+Selecting trackers
+------------------
+
+Commands that take tracker arguments (`evaluate`, `analysis`, `report`) accept several
+reference forms, which can be freely mixed in a single command:
+
+* `<identifier>` - a single tracker, by its registry section name,
+* `#<tag>` - every tracker whose registry entry carries that tag. Tags are declared with the
+  `tags` field of a registry entry (see :doc:`tutorials/integration`); for example `#opencv`
+  resolves all trackers tagged `opencv`,
+* `all` - every tracker registered in the registry (`evaluate` only),
+* `<identifier>@<version>` or `<identifier>@` - a specific version, or all versions found in
+  results storage (see :doc:`tutorials/versioning`).
+
+Examples:
+
+.. code-block:: bash
+
+	vot evaluate #opencv                 # all trackers tagged "opencv"
+	vot evaluate #opencv #dl mytracker   # tags and explicit identifiers combined
+	vot evaluate all                     # every tracker in the registry
+	vot analysis #dl                     # analyse every tracker tagged "dl"
 
 Perform analysis
 ----------------

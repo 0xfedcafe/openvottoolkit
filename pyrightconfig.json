@@ -1,0 +1,6 @@
+{
+  "include": ["vot"],
+  "stubPath": "typings",
+  "venvPath": "..",
+  "venv": ".venv"
+}

@@ -2,8 +2,10 @@
 trackers, datasets and experiments."""
 
 import os
-import typing
 import importlib
+import typing
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 import yaml
 from lazy_object_proxy import Proxy
@@ -16,7 +18,7 @@ from ..tracker import Registry, Tracker
 from ..stack import Stack, resolve_stack
 from ..utilities import normalize_path
 from ..report import ReportConfiguration
-from .storage import LocalStorage, Storage, NullStorage
+from .storage import FilesystemStorage, LocalStorage, Storage, NullStorage
 
 _logger = get_logger()
 
@@ -24,28 +26,53 @@ class WorkspaceException(ToolkitException):
     """Errors related to workspace raise this exception."""
     pass
 
-class StackLoader(Attribute):
+class Loader(Attribute, ABC):
+    """Abstract base for attribute loaders that need custom coerce and dump logic.
+
+    Subclasses must implement both coerce (raw YAML value → domain object) and
+    dump (domain object → YAML-serialisable value) so the pair is always in sync.
+    """
+
+    @abstractmethod
+    def coerce(self, value: typing.Any, context: CoerceContext | None = None) -> typing.Any:
+        """Convert a raw (typically YAML-deserialised) value to the target type."""
+
+    @abstractmethod
+    def dump(self, value: typing.Any) -> typing.Any:
+        """Convert a domain object back to a YAML-serialisable value."""
+
+
+class StackLoader(Loader):
     """Special attribute that converts a string or a dictionary input to a Stack
     object."""
 
-    def coerce(self, value, context: typing.Optional[CoerceContext]):
+    def coerce(self, value: typing.Any = None, context: CoerceContext | None = None) -> Stack:
         """Coerce a value to a Stack object.
 
         :param value: Value to coerce
         :type value: typing.Any
         :param context: Coercion context
-        :type context: typing.Optional[CoerceContext]
+        :type context: CoerceContext | None
 
         :returns: Coerced value
         :rtype: Stack"""
         importlib.import_module("vot.analysis")
         importlib.import_module("vot.experiment")
+
+        if context is None:
+            raise WorkspaceException("Stack attribute requires coercion context")
+
         if isinstance(value, str):
+            if context.parent is None:
+                raise WorkspaceException("Stack attribute requires parent context")
 
             stack_file = resolve_stack(value, context.parent.directory)
 
             if stack_file is None:
-                raise WorkspaceException("Experiment stack does not exist")
+                raise WorkspaceException(
+                    "Experiment stack '{}' does not exist (searched workspace directory '{}' "
+                    "and the built-in stacks). Set 'stack' in config.yaml to a built-in stack "
+                    "name or to an existing stack file.".format(value, context.parent.directory))
 
             stack = Stack.read(stack_file)
             stack._name = value
@@ -54,42 +81,54 @@ class StackLoader(Attribute):
         else:
             return Stack(**value)
 
-    def dump(self, value: "Stack") -> str:
-        """Dump a Stack object to a string or a dictionary.
+    def dump(self, value: "Stack") -> str | dict[str, typing.Any]:
+        """Dump a Stack to a stack name (str) if named, or a full config dict otherwise.
 
-        :param value: Value to dump
+        :param value: Stack to dump
         :type value: Stack
 
-        :returns: Dumped value
-        :rtype: str"""
+        :returns: Stack name or full configuration dictionary
+        :rtype: str | dict[str, Any]"""
         if value.name is None:
             return value.dump()
         else:
             return value.name
 
-class RegistryLoader(Attribute):
+class RegistryLoader(Loader):
     """Special attribute that converts a list of strings input to a Registry object.
 
     The paths are appended to the global registry search paths.
     """
     
-    def coerce(self, value, context: typing.Optional[CoerceContext]):
-        
+    def coerce(self, value: typing.Any, context: CoerceContext | None = None) -> "Registry":
+
         from vot import config, get_logger
-        
+
+        if context is None or context.parent is None:
+            raise WorkspaceException("Registry attribute requires parent context")
+
+        parent_directory = context.parent.directory
+
         # Workspace registry paths are relative to the workspace directory
-        paths = list(List(String(transformer=lambda x, ctx: normalize_path(x, ctx.parent.directory))).coerce(value, context))
+        list_loader: List = typing.cast(List, List(String(transformer=lambda x, ctx: normalize_path(x, ctx.parent.directory))))
+        paths = list(list_loader.coerce(value, context))
 
         # Combine the paths with the global registry search paths (relative to the current directory)
-        registry = Registry(paths + [normalize_path(x, os.curdir) for x in config.registry], root=context.parent.directory)
+        registry = Registry(paths + [normalize_path(x, os.curdir) for x in config.registry], root=parent_directory)
         registry._paths = paths
- 
+
         get_logger().debug("Found data for %d trackers", len(registry))
 
         return registry
 
-    def dump(self, value: "Registry") -> typing.List[str]:
-        assert isinstance(value, Registry)
+    def dump(self, value: "Registry") -> list[str]:
+        """Dump the registry back to the list of workspace-relative paths that were loaded.
+
+        :param value: Registry to dump
+        :type value: Registry
+
+        :returns: List of workspace-relative tracker registry paths
+        :rtype: list[str]"""
         return value._paths
 
 class Workspace(Attributee):
@@ -99,10 +138,20 @@ class Workspace(Attributee):
     Each workspace performs given experiments on a provided dataset.
     """
 
-    registry = RegistryLoader() # List(String(transformer=lambda x, ctx: normalize_path(x, ctx.parent.directory)))
-    stack = StackLoader()
-    sequences = String(default="sequences")
-    report = Nested(ReportConfiguration)
+    # These are class-level ``Attribute`` descriptors that the ``Attributee``
+    # metaclass strips and replaces with coerced instance values. The
+    # ``TYPE_CHECKING`` branch exposes those coerced runtime types to type
+    # checkers; the ``else`` branch is what actually executes at import time.
+    if TYPE_CHECKING:
+        registry: Registry
+        stack: Stack
+        sequences: str
+        report: ReportConfiguration
+    else:
+        registry = RegistryLoader()
+        stack = StackLoader()
+        sequences = String(default="sequences")
+        report = Nested(ReportConfiguration)
 
     @staticmethod
     def exists(directory: str) -> bool:
@@ -116,13 +165,13 @@ class Workspace(Attributee):
         return os.path.isfile(os.path.join(directory, "config.yaml"))
 
     @staticmethod
-    def initialize(directory: str, config: typing.Optional[typing.Dict] = None, download: bool = True) -> None:
+    def initialize(directory: str, config: dict | None = None, download: bool = True) -> None:
         """Initialize a new workspace in a given directory with the given config.
 
         :param directory: Root for workspace storage
         :type directory: str
         :param config: Workspace initial configuration. Defaults to None.
-        :type config: typing.Optional[typing.Dict], optional
+        :type config: dict | None, optional
         :param download: Download the dataset immediately. Defaults to True.
         :type download: bool, optional
 
@@ -143,7 +192,7 @@ class Workspace(Attributee):
         if not os.path.isfile(os.path.join(directory, "trackers.ini")):
             open(os.path.join(directory, "trackers.ini"), 'w').close()
 
-        if download:
+        if download and config is not None:
             # Try do retrieve dataset from stack and download it
             stack_file = resolve_stack(config["stack"], directory)
             dataset_directory = normalize_path(config.get("sequences", "sequences"), directory)
@@ -165,8 +214,10 @@ class Workspace(Attributee):
         :param directory: Directory where the dataset is saved
         :type directory: str
         """
-        if os.path.exists(os.path.join(directory, "list.txt")): #TODO: this has to be improved now that we also support other datasets that may not have list.txt
-            return False
+        from vot.dataset.layout import SequenceList
+        # TODO: this has to be improved now that we also support other datasets that may not have list.txt
+        if SequenceList(directory).exists():
+            return
 
         from vot.dataset import download_dataset
         download_dataset(dataset, directory)
@@ -174,15 +225,14 @@ class Workspace(Attributee):
         _logger.info("Download completed")
 
     @staticmethod
-    def load(directory):
-        """Load a workspace from a given location. This.
+    def load(directory: str) -> "Workspace":
+        """Load a workspace from a given directory.
 
-        :param directory: [description]
-        :type directory: [type]
+        :param directory: The workspace root directory.
 
-        :raises WorkspaceException: [description]
-        :returns: [description]
-        :rtype: [type]"""
+        :raises WorkspaceException: If the directory is not an initialized workspace.
+        :returns: The loaded workspace.
+        :rtype: Workspace"""
         directory = normalize_path(directory)
         config_file = os.path.join(directory, "config.yaml")
         if not os.path.isfile(config_file):
@@ -192,12 +242,11 @@ class Workspace(Attributee):
             config = yaml.load(fp, Loader=yaml.BaseLoader)
             return Workspace(directory, **config)
 
-    def __init__(self, directory: str, **kwargs):
+    def __init__(self, directory: str, **kwargs: typing.Any) -> None:
         """Do not call this constructor directly unless you know what you are doing,
         instead use the static Workspace.load method.
 
-        :param directory: [description]
-        :type directory: [type]
+        :param directory: The workspace root directory.
         """
         self._directory = directory
 
@@ -207,7 +256,7 @@ class Workspace(Attributee):
 
         dataset_directory = normalize_path(self.sequences, directory)
 
-        if not self.stack.dataset is None:
+        if self.stack.dataset is not None:
             Workspace.download_dataset(self.stack.dataset, dataset_directory)
 
         self._dataset = load_dataset(dataset_directory)
@@ -240,12 +289,12 @@ class Workspace(Attributee):
         :rtype: Storage"""
         return self._storage
 
-    def list_results(self, registry: "Registry") -> typing.List["Tracker"]:
+    def list_results(self, registry: "Registry") -> list["Tracker"]:
         """Utility method that looks for all subfolders in the results folder and tries
         to resolve them as tracker references. It returns a list of Tracker objects,
         i.e. trackers that have at least some results or an existing results directory.
 
         :returns: A list of trackers with results.
-        :rtype: [typing.List[Tracker]]"""
+        :rtype: list[Tracker]"""
         references = self._storage.substorage("results").folders()
         return registry.resolve(*references)
