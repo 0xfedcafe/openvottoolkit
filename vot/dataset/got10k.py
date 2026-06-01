@@ -13,8 +13,7 @@ import six
 
 from vot import get_logger
 from vot.dataset import DatasetException, BasedSequence, \
-     PatternFileListChannel, SequenceData, Sequence
-from vot.region import Special, SpecialCode
+     PatternFileListChannel, SequenceData, Sequence, pad_to_length, pad_single_frame_groundtruth
 from vot.region.io import read_trajectory
 
 logger = get_logger()
@@ -51,12 +50,7 @@ def _read_data(metadata: dict[str, Any]) -> SequenceData:
     groundtruth_file = os.path.join(base, metadata.get("groundtruth", "groundtruth.txt"))
     groundtruth = read_trajectory(groundtruth_file)
 
-    channel_length = len(channels["color"])
-    if len(groundtruth) == 1 and channel_length > 1:
-        # We are dealing with the testing dataset — only the first frame is annotated,
-        # so we pad the groundtruth with unknowns. Only the unsupervised experiment will
-        # work, but that is fine.
-        groundtruth.extend([Special(SpecialCode.UNKNOWN)] * (channel_length - 1))
+    groundtruth = pad_single_frame_groundtruth(groundtruth, len(channels["color"]))
 
     metadata["length"] = len(groundtruth)
 
@@ -66,9 +60,7 @@ def _read_data(metadata: dict[str, Any]) -> SequenceData:
         with open(tagfile, 'r') as filehandle:
             tagname = os.path.splitext(os.path.basename(tagfile))[0]
             tag = [line.strip() == "1" for line in filehandle.readlines()]
-            while len(tag) < len(groundtruth):
-                tag.append(False)
-            tags[tagname] = tag
+            tags[tagname] = pad_to_length(tag, len(groundtruth), False)
 
     valuefiles = glob.glob(os.path.join(base, '*.value'))
 
@@ -76,9 +68,7 @@ def _read_data(metadata: dict[str, Any]) -> SequenceData:
         with open(valuefile, 'r') as filehandle:
             valuename = os.path.splitext(os.path.basename(valuefile))[0]
             value = [float(line.strip()) for line in filehandle.readlines()]
-            while len(value) < len(groundtruth):
-                value.append(0.0)
-            values[valuename] = value
+            values[valuename] = pad_to_length(value, len(groundtruth), 0.0)
 
     for name, channel in channels.items():
         if len(channel) != len(groundtruth):

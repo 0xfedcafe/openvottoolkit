@@ -16,6 +16,9 @@ are guaranteed to agree on the encoding.
 from __future__ import annotations
 
 import os
+import shlex
+import subprocess
+import sys
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -87,6 +90,27 @@ def convert_region(region: Region, target: str | None) -> Region:
     if target == "polygon":
         return Polygon.convert(region)
     raise ValueError("Unknown target region type: {}".format(target))
+
+
+def spawn_process(command: str, cwd: str, env: dict) -> subprocess.Popen:
+    """Launch ``command`` as a tracker subprocess with piped stdio.
+
+    On POSIX the command is split with :func:`shlex.split` and run without a shell; on
+    Windows the raw string is passed through.
+
+    :param command: The command line to run.
+    :param cwd: Working directory for the process.
+    :param env: Environment variables for the process.
+
+    :returns: The spawned process."""
+    args = command if sys.platform.startswith("win") else shlex.split(command)
+    return subprocess.Popen(
+        args,
+        cwd=cwd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env, bufsize=0, close_fds=False)
 
 
 def normalize_paths(paths: list[str], tracker: "Tracker") -> list[str]:

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from vot.dataset import Sequence
     from vot.workspace.storage import Storage, Results
     from vot.tracker import Tracker, TrackerRuntime
+    from vot.analysis import Analysis
 
 class RealtimeConfig(Attributee):
     """Config proxy for real-time experiment."""
@@ -244,6 +245,10 @@ class Experiment(Attributee):
 
         :returns: Writable log file handle (from the workspace storage)."""
         return self._storage.substorage("logs").write("{}_{:%Y-%m-%dT%H-%M-%S.%f%z}.log".format(identifier, datetime.now()))
+
+    def compatible_analyses(self) -> "list[Analysis]":
+        """The experiment's analyses that are compatible with it."""
+        return [analysis for analysis in self.analyses if analysis.compatible(self)]
 
     def transform(self, sequences: "Sequence | list[Sequence]") -> "list[Sequence]":
         """Transform a list of sequences using the experiment transformers.

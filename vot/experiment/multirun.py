@@ -67,6 +67,19 @@ class MultiRunExperiment(Experiment):
 
         return True
 
+    def _check_multiobject(self, sequence: Sequence) -> bool:
+        """Whether ``sequence`` has multiple objects, asserting the experiment allows it."""
+        multiobject = len(sequence.objects()) > 1
+        assert self._multiobject or not multiobject
+        return multiobject
+
+    @staticmethod
+    def _result_name(sequence: Sequence, object_id: str, repetition: int, multiobject: bool) -> str:
+        """Name of the stored result file for one object/repetition."""
+        if multiobject:
+            return f"{sequence.name}_{object_id}_{repetition:03d}"
+        return f"{sequence.name}_{repetition:03d}"
+
     def scan(self, tracker: Tracker, sequence: Sequence) -> tuple:
         """Scan the results of the experiment for the given tracker and sequence.
 
@@ -82,13 +95,11 @@ class MultiRunExperiment(Experiment):
 
         files = []
         complete = True
-        multiobject = len(sequence.objects()) > 1
-        assert self._multiobject or not multiobject
+        multiobject = self._check_multiobject(sequence)
 
         for o in sequence.objects():
-            prefix = sequence.name if not multiobject else f"{sequence.name}_{o}"
             for i in range(1, self.repetitions+1):
-                name = f"{prefix}_{i:03d}"
+                name = self._result_name(sequence, o, i, multiobject)
                 if Trajectory.exists(results, name):
                     files.extend(Trajectory.gather(results, name))
                 elif self._can_stop(tracker, sequence):
@@ -122,18 +133,15 @@ class MultiRunExperiment(Experiment):
         :returns: The list of trajectories (with ``None`` placeholders when ``pad`` is True)."""
         trajectories: list[Trajectory | None] = list()
 
-        multiobject = len(sequence.objects()) > 1
-
-        assert self._multiobject or not multiobject
+        multiobject = self._check_multiobject(sequence)
         results = self.results(tracker, sequence)
 
         if objects is None:
             objects = list(sequence.objects())
 
         for o in objects:
-            prefix = sequence.name if not multiobject else f"{sequence.name}_{o}"
             for i in range(1, self.repetitions+1):
-                name =  f"{prefix}_{i:03d}"
+                name = self._result_name(sequence, o, i, multiobject)
                 if Trajectory.exists(results, name):
                     trajectories.append(Trajectory.read(results, name))
                 elif pad:
@@ -185,14 +193,9 @@ class UnsupervisedExperiment(MultiRunExperiment):
 
         results = self.results(tracker, sequence)
 
-        multiobject = len(sequence.objects()) > 1
-        assert self._multiobject or not multiobject
+        multiobject = self._check_multiobject(sequence)
 
         helper = MultiObjectHelper(sequence)
-
-        def result_name(sequence, o, i):
-            """Get the name of the result file."""
-            return f"{sequence.name}_{o}_{i:03d}" if multiobject else f"{sequence.name}_{i:03d}"
 
         # Generate object queries for all objects in the sequence
         queries = []
@@ -214,7 +217,7 @@ class UnsupervisedExperiment(MultiRunExperiment):
                 for o in helper.all(): 
                     trajectories[o] = Trajectory(len(sequence))
 
-                if all([Trajectory.exists(results, result_name(sequence, o, i)) for o in trajectories.keys()]) and not force:
+                if all([Trajectory.exists(results, self._result_name(sequence, o, i, multiobject)) for o in trajectories.keys()]) and not force:
                     continue
 
                 if self._can_stop(tracker, sequence):
@@ -263,7 +266,7 @@ class UnsupervisedExperiment(MultiRunExperiment):
                     for frame in range(len(sequence)):
                         trajectory.set(frame, trajectory.region(frame), {"time": times[frame]})
 
-                    trajectory.write(results, result_name(sequence, o, i))
+                    trajectory.write(results, self._result_name(sequence, o, i, multiobject))
 
 
 class SupervisedExperiment(MultiRunExperiment):
@@ -320,7 +323,7 @@ class SupervisedExperiment(MultiRunExperiment):
                 raise ValueError("SupervisedExperiment requires an online tracker runtime.")
 
             for i in range(1, self.repetitions + 1):
-                name = f"{sequence.name}_{i:03d}"
+                name = self._result_name(sequence, "", i, multiobject=False)
 
                 if Trajectory.exists(results, name) and not force:
                     continue

@@ -15,7 +15,6 @@ from typing import Any, TYPE_CHECKING
 import six
 
 from vot import get_logger
-from vot.region import Special, SpecialCode
 from vot.region.io import read_trajectory
 
 if TYPE_CHECKING:
@@ -46,7 +45,7 @@ def _read_data(metadata: dict[str, Any]) -> "SequenceData":
     :param metadata: Metadata dictionary.
 
     :returns: Sequence data object."""
-    from vot.dataset import SequenceData
+    from vot.dataset import SequenceData, pad_single_frame_groundtruth
 
     tags: dict[str, Any] = {}
     values: dict[str, Any] = {}
@@ -60,12 +59,7 @@ def _read_data(metadata: dict[str, Any]) -> "SequenceData":
 
     groundtruth = read_trajectory(root)
 
-    channel_length = len(channels["color"])
-    if len(groundtruth) == 1 and channel_length > 1:
-        # We are dealing with the testing dataset — only the first frame is annotated,
-        # pad the groundtruth with unknowns. Only the unsupervised experiment will work,
-        # but that is fine.
-        groundtruth.extend([Special(SpecialCode.UNKNOWN)] * (channel_length - 1))
+    groundtruth = pad_single_frame_groundtruth(groundtruth, len(channels["color"]))
 
     metadata["length"] = len(groundtruth)
 

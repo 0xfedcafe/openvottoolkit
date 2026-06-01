@@ -610,10 +610,7 @@ class CountFrames(SeparableAnalysis):
 
         ignore_masks = sequence.object(self.ignore_masks)
 
-        if self.filter_tag is not None:
-            frame_mask: list[bool] | None = [self.filter_tag in sequence.tags(i) for i in range(len(sequence))]
-        else:
-            frame_mask = None
+        frame_mask = sequence.tag_mask(self.filter_tag)
 
         for o in objects:
             trajectories = experiment.gather(tracker, sequence, objects=[o])
@@ -683,10 +680,7 @@ class QualityAuxiliary(SeparableAnalysis):
 
         ignore_masks = sequence.object(self.ignore_masks)
 
-        if self.filter_tag is not None:
-            frame_mask: list[bool] | None = [self.filter_tag in sequence.tags(i) for i in range(len(sequence))]
-        else:
-            frame_mask = None
+        frame_mask = sequence.tag_mask(self.filter_tag)
 
         for o in objects:
             trajectories = experiment.gather(tracker, sequence, objects=[o])

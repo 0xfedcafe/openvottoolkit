@@ -104,12 +104,7 @@ class CumulativeFailureCount(SequenceAggregator):
         :returns: The aggregated failure count.
         :rtype: tuple[Any, ...]"""
 
-        failures = 0
-
-        for a in results:
-            failures = failures + a[0]
-
-        return failures,
+        return self._sum_column(results, 0),
 
 
 class CrashCount(SeparableAnalysis):
@@ -184,12 +179,7 @@ class CumulativeCrashCount(SequenceAggregator):
 
         :returns: ``(total_crashes,)``."""
 
-        crashes = 0
-
-        for a in results:
-            crashes = crashes + a[0]
-
-        return crashes,
+        return self._sum_column(results, 0),
 
 
 class SequenceFailureCurve(SeparableAnalysis):

@@ -256,23 +256,25 @@ class LocalStorage(FilesystemStorage):
         storage = LocalStorage(os.path.join(self._results, tracker.reference, experiment.identifier, sequence.name))
         return Results(storage)
 
+    def _list_entries(self, predicate: typing.Callable[[str], bool]) -> list[str]:
+        """Names of entries directly under the root whose full path satisfies ``predicate``."""
+        if not os.path.isdir(self._root):
+            return []
+        return [name for name in os.listdir(self._root) if predicate(os.path.join(self._root, name))]
+
     def documents(self) -> list[str]:
         """Lists documents in the storage.
 
         :returns: List of document names.
         :rtype: list"""
-        if not os.path.isdir(self._root):
-            return []
-        return [name for name in os.listdir(self._root) if os.path.isfile(os.path.join(self._root, name))]
+        return self._list_entries(os.path.isfile)
 
     def folders(self) -> list[str]:
         """Lists folders in the storage.
 
         :returns: List of folder names.
         :rtype: list"""
-        if not os.path.isdir(self._root):
-            return []
-        return [name for name in os.listdir(self._root) if os.path.isdir(os.path.join(self._root, name))]
+        return self._list_entries(os.path.isdir)
 
     def write(self, name: str, binary: bool = False) -> typing.IO:
         """Opens the given file entry for writing, returns opened handle.

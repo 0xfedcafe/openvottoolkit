@@ -15,7 +15,7 @@ import numpy.typing as npt
 
 from cachetools import cached, LRUCache
 
-from vot.region import Region
+from vot.region import Region, Special, SpecialCode
 from vot import ToolkitException
 from vot.utilities import Registry
 
@@ -24,6 +24,21 @@ import cv2
 class DatasetException(ToolkitException):
     """Dataset and sequence related exceptions."""
     pass
+
+def pad_to_length(items: list, length: int, fill) -> list:
+    """Right-pad ``items`` in place to ``length`` with ``fill`` (no-op if already long enough)."""
+    if len(items) < length:
+        items += [fill] * (length - len(items))
+    return items
+
+def pad_single_frame_groundtruth(groundtruth: list[Region], channel_length: int) -> list[Region]:
+    """Pad a single-annotated-frame testing sequence with unknowns for the remaining frames.
+
+    Testing-split datasets annotate only the first frame; the rest are filled with the
+    unknown special code so the unsupervised experiment can still run."""
+    if len(groundtruth) == 1 and channel_length > 1:
+        groundtruth.extend([Special(SpecialCode.UNKNOWN)] * (channel_length - 1))
+    return groundtruth
 
 class Channel(ABC):
     """Abstract representation of individual image channel, a sequence of images with
@@ -616,6 +631,23 @@ class Sequence(FrameList):
         :returns: List of tags
         :rtype: list"""
         raise NotImplementedError()
+
+    def tag_mask(self, tag: str | None, collapse_empty: bool = False) -> list[bool] | None:
+        """Per-frame boolean mask of frames carrying ``tag``, or ``None`` when ``tag`` is
+        ``None`` (no filtering). With ``collapse_empty``, an all-``False`` mask also
+        returns ``None`` so a tag matching no frame means "no filter" rather than "drop
+        everything".
+
+        :param tag: Tag to match, or None for no filtering
+        :param collapse_empty: Treat a mask with no matches as None
+        :returns: Per-frame mask or None
+        :rtype: list[bool] | None"""
+        if tag is None:
+            return None
+        mask = [tag in self.tags(i) for i in range(len(self))]
+        if collapse_empty and not any(mask):
+            return None
+        return mask
 
     @overload
     def values(self, index: None = None) -> list[str]: ...

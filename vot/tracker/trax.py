@@ -11,7 +11,6 @@ import time
 import re
 import subprocess
 import shutil
-import shlex
 import socket as socketio
 import tempfile
 import logging
@@ -35,7 +34,7 @@ from vot.dataset import Frame, DatasetException
 from vot.region import Region, Polygon, Rectangle, Mask
 from vot.tracker import Tracker, TrackerException, TrackerRuntime, FrameObjects, ObjectStatus, OnlineTrackerRuntime
 from vot.utilities import to_logical, to_number
-from vot.tracker.helpers import normalize_paths
+from vot.tracker.helpers import normalize_paths, spawn_process
 
 PORT_POOL_MIN = 9090
 PORT_POOL_MAX = 65535
@@ -169,6 +168,12 @@ def convert_objects(objects: FrameObjects | None) -> list:
     return [(convert_region(objects), dict())]
 
 
+def convert_traxstatus(status: list) -> list[ObjectStatus]:
+    """Converts a Trax client ``[(TraxRegion, properties), ...]`` status into a list of
+    :class:`ObjectStatus` (inverse of :func:`convert_objects`)."""
+    return [ObjectStatus(convert_traxregion(region), properties) for region, properties in status]
+
+
 def convert_traxobjects(region: TraxRegion) -> Region:
     """Same as :func:`convert_traxregion` — kept for historical naming."""
     return convert_traxregion(region)
@@ -243,23 +248,7 @@ class TrackerProcess(object):
 
         logger.debug("Running process: %s", command)
 
-        if sys.platform.startswith("win"):
-            self._process = subprocess.Popen(
-                    command,
-                    cwd=self._workdir,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    env=environment, bufsize=0, close_fds=False)
-        else:
-            self._process = subprocess.Popen(
-                    shlex.split(command),
-                    shell=False,
-                    cwd=self._workdir,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    env=environment, bufsize=0, close_fds=False)
+        self._process = spawn_process(command, self._workdir, environment)
 
         self._timeout = timeout
         self._client = None
@@ -275,9 +264,9 @@ class TrackerProcess(object):
             if socket:
                 self._client = Client(stream=self._socket.fileno(), timeout=30, log=log)
             else:
-                # ``stdin``/``stdout`` are explicitly set to ``subprocess.PIPE`` above
-                # so they are guaranteed non-None at runtime; narrow for the type
-                # checker, which sees them as ``IO[bytes] | None`` in the stubs.
+                # ``spawn_process`` sets ``stdin``/``stdout`` to ``subprocess.PIPE``, so
+                # they are guaranteed non-None at runtime; narrow for the type checker,
+                # which sees them as ``IO[bytes] | None`` in the stubs.
                 assert self._process.stdin is not None and self._process.stdout is not None
                 self._client = Client(
                     stream=(self._process.stdin.fileno(), self._process.stdout.fileno()), log=log
@@ -380,7 +369,7 @@ class TrackerProcess(object):
 
         self._watchdog_reset(False)
 
-        status = [ObjectStatus(convert_traxregion(region), properties) for region, properties in status]
+        status = convert_traxstatus(status)
 
         return status, elapsed
 
@@ -410,7 +399,7 @@ class TrackerProcess(object):
 
         self._watchdog_reset(False)
 
-        status = [ObjectStatus(convert_traxregion(region), properties) for region, properties in status]
+        status = convert_traxstatus(status)
 
         return status, elapsed
 

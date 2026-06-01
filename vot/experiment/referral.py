@@ -26,6 +26,15 @@ class ReferralExperiment(Experiment):
         """Prevent SingleObject transformer from splitting sequences with ignore objects."""
         return True
 
+    def _ensure_single_object(self, sequence: Sequence) -> None:
+        """Referral only supports single-object sequences."""
+        assert len(sequence.objects()) == 1, "Referral experiment only supports single object sequences."
+
+    @staticmethod
+    def _prompt_result_name(sequence: Sequence, prompt: str) -> str:
+        """Name of the stored result file for one prompt."""
+        return f"{sequence.name}_{md5(prompt.encode()).hexdigest()[:8]}"
+
     def _extract_prompt(self, sequence: Sequence) -> list[str]:
         # ``sequence.metadata`` returns ``object`` per the abstract contract;
         # narrow to ``str`` here so ``.split`` is type-safe.
@@ -47,13 +56,12 @@ class ReferralExperiment(Experiment):
 
         files: list[Any] = []
         complete = True
-        assert len(sequence.objects()) == 1, "Referral experiment only supports single object sequences."
+        self._ensure_single_object(sequence)
 
         prompts = self._extract_prompt(sequence)
 
         for prompt in prompts:
-            prompt_hash = md5(prompt.encode()).hexdigest()[:8]
-            name = f"{sequence.name}_{prompt_hash}"
+            name = self._prompt_result_name(sequence, prompt)
             if Trajectory.exists(results, name):
                 files.extend(Trajectory.gather(results, name))
             else:
@@ -80,15 +88,14 @@ class ReferralExperiment(Experiment):
         del objects  # referral is single-object; the param exists for API parity only.
         trajectories: list[Trajectory | None] = []
 
-        assert len(sequence.objects()) == 1, "Referral experiment only supports single object sequences."
+        self._ensure_single_object(sequence)
 
         prompts = self._extract_prompt(sequence)
 
         results = self.results(tracker, sequence)
 
         for prompt in prompts:
-            prompt_hash = md5(prompt.encode()).hexdigest()[:8]
-            name = f"{sequence.name}_{prompt_hash}"
+            name = self._prompt_result_name(sequence, prompt)
             if Trajectory.exists(results, name):
                 trajectories.append(Trajectory.read(results, name))
             elif pad:
@@ -104,7 +111,7 @@ class ReferralExperiment(Experiment):
     ) -> None:
         prompts = self._extract_prompt(sequence)
 
-        assert len(sequence.objects()) == 1, "Referral experiment only supports single object sequences."
+        self._ensure_single_object(sequence)
 
         results = self.results(tracker, sequence)
 
@@ -116,8 +123,7 @@ class ReferralExperiment(Experiment):
             for prompt_index, prompt in enumerate(prompts):
 
                 # Check if trajectory already exists
-                prompt_hash = md5(prompt.encode()).hexdigest()[:8]
-                name = f"{sequence.name}_{prompt_hash}"
+                name = self._prompt_result_name(sequence, prompt)
                 if Trajectory.exists(results, name) and not force:
                     continue
 

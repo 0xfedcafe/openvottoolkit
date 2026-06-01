@@ -294,6 +294,18 @@ class PythonRuntime(OnlineTrackerRuntime):
 
         return FrameResult([ObjectStatus(decode_region(status[0]), status[1]) for status in message.get("status", [])], float(message.get("time", 0.0)))
 
+    @staticmethod
+    def _mirror_output_shape(input_is_list: bool, status: FrameObjects) -> FrameObjects:
+        """Match the result shape to the input: a query-based caller passes a list and
+        indexes the result per query, while a legacy per-frame caller passes a single
+        ObjectStatus and expects one back. ``_send_task`` returns a bare ObjectStatus for
+        single-object trackers, so wrap/unwrap to mirror the input."""
+        if input_is_list and not isinstance(status, list):
+            return [status]
+        if not input_is_list and isinstance(status, list):
+            return status[0]
+        return status
+
     def initialize(self, frame: Frame, new: FrameObjects | None = None, properties: dict | None = None) -> tuple[FrameObjects, float]:
         self._ensure_started()
         # ``new`` is either a single ObjectStatus (legacy per-frame caller) or a
@@ -320,15 +332,7 @@ class PythonRuntime(OnlineTrackerRuntime):
                 new = new[0]
 
         status, elapsed = self._send_task("initialize", frame, new, properties)
-        # Mirror the input shape: a query-based caller (OnlineTrackerRuntime.run)
-        # passes a list and indexes the result per query, while a legacy per-frame
-        # caller passes a single ObjectStatus and expects one back. ``_send_task``
-        # returns a bare ObjectStatus for single-object trackers, so wrap it.
-        if input_is_list and not isinstance(status, list):
-            status = [status]
-        elif not input_is_list and isinstance(status, list):
-            status = status[0]
-        return status, elapsed
+        return self._mirror_output_shape(input_is_list, status), elapsed
 
     def update(self, frame: Frame, new: FrameObjects | None = None, properties: dict | None = None) -> tuple[FrameObjects, float]:
         self._ensure_started()
@@ -342,13 +346,7 @@ class PythonRuntime(OnlineTrackerRuntime):
             new = new[0] if len(new) == 1 else None
 
         status, elapsed = self._send_task("update", frame, new, properties)
-        # Mirror the input shape (see ``initialize``): wrap a bare single-object
-        # ObjectStatus back into a list when the caller queried with a list.
-        if input_is_list and not isinstance(status, list):
-            status = [status]
-        elif not input_is_list and isinstance(status, list):
-            status = status[0]
-        return status, elapsed
+        return self._mirror_output_shape(input_is_list, status), elapsed
 
     def restart(self) -> None:
         self.stop()

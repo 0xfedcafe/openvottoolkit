@@ -612,6 +612,11 @@ class SequenceAggregator(Analysis): # pylint: disable=W0223
         """
         raise NotImplementedError()
 
+    @staticmethod
+    def _sum_column(results: Grid, column: int) -> float:
+        """Sum the ``column``-th element of every per-sequence result tuple."""
+        return sum(a[column] for a in results)
+
     def compute(self, experiment: Experiment, trackers: list[Tracker], sequences: list[Sequence], dependencies: list[Grid]) -> Grid:
         """Compute the analysis for a list of trackers and sequences.
 

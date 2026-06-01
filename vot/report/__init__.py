@@ -680,6 +680,14 @@ class Report(Attributee):
 
         return (future.result() for future in futures)
 
+    async def _single_result(self, analysis: "Analysis", experiment: "Experiment", trackers: list["Tracker"], sequences: list["Sequence"]) -> typing.Any:
+        """Run a single analysis via :meth:`process` and return its sole result, or
+        ``None`` when there was nothing to compute (``process`` yielded no futures)."""
+        analysis_result = await self.process([analysis], experiment, trackers, sequences)
+        if isinstance(analysis_result, dict):
+            return None
+        return next(iter(analysis_result))
+
 class SeparableReport(Report):
     """A report generator that is separable across experiments.
 

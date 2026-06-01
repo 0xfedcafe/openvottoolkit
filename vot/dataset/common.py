@@ -14,7 +14,7 @@ from pathlib import Path
 
 import cv2
 
-from vot.dataset import Channel, DatasetException, Sequence, BasedSequence, PatternFileListChannel, SequenceData
+from vot.dataset import Channel, DatasetException, Sequence, BasedSequence, PatternFileListChannel, SequenceData, pad_to_length
 from vot.dataset.layout import (DEFAULT_FRAME_MASK, GROUNDTRUTH_FILE, METADATA_FILE,
                                 SequenceList, detect_frame_pattern, read_metadata,
                                 write_metadata)
@@ -117,15 +117,13 @@ def _read_data(metadata: dict) -> SequenceData:
     if len(objectsfiles) > 0:
         for objectfile in objectsfiles:
             groundtruth = read_trajectory(str(objectfile))
-            if len(groundtruth) < length:
-                groundtruth += [Special(SpecialCode.UNKNOWN)] * (length - len(groundtruth))
+            groundtruth = pad_to_length(groundtruth, length, Special(SpecialCode.UNKNOWN))
             objectid = objectfile.stem[len("groundtruth_"):]
             objects[objectid] = groundtruth
     else:
         groundtruth_file = root / metadata.get("groundtruth", GROUNDTRUTH_FILE)
         groundtruth = read_trajectory(str(groundtruth_file))
-        if len(groundtruth) < length:
-            groundtruth += [Special(SpecialCode.UNKNOWN)] * (length - len(groundtruth))
+        groundtruth = pad_to_length(groundtruth, length, Special(SpecialCode.UNKNOWN))
         objects["object"] = groundtruth
 
     metadata["length"] = length
@@ -136,9 +134,7 @@ def _read_data(metadata: dict) -> SequenceData:
         with open(tagfile, 'r') as filehandle:
             tagname = tagfile.stem
             tag = [line.strip() == "1" for line in filehandle.readlines()]
-            while not len(tag) >= length:
-                tag.append(False)
-            tags[tagname] = tag
+            tags[tagname] = pad_to_length(tag, length, False)
 
     valuefiles = sorted(root.glob("*.value"))
 
@@ -146,9 +142,7 @@ def _read_data(metadata: dict) -> SequenceData:
         with open(valuefile, 'r') as filehandle:
             valuename = valuefile.stem
             value = [float(line.strip()) for line in filehandle.readlines()]
-            while not len(value) >= length:
-                value.append(0.0)
-            values[valuename] = value
+            values[valuename] = pad_to_length(value, length, 0.0)
 
     for name, tag in tags.items():
         if not len(tag) == length:

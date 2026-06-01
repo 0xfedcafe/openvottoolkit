@@ -36,6 +36,29 @@ def escape_matlab_path(path: str) -> str:
     :returns: The escaped path."""
     return path.replace("'", "''")
 
+def split_paths(paths: str | list[str]) -> list[str]:
+    """Normalizes ``paths`` to a list, splitting a string on the path separator."""
+    if isinstance(paths, list):
+        return paths
+    return paths.split(os.pathsep)
+
+def find_executable_root(root_env_var: str, executable_name: str, error_msg: str) -> str:
+    """Locate an installation root for ``executable_name``.
+
+    Uses ``$root_env_var`` if set, otherwise scans ``$PATH`` for the executable and
+    takes its parent directory.
+
+    :raises RuntimeError: with ``error_msg`` if the root cannot be determined."""
+    root: str | None = os.getenv(root_env_var, None)
+    if root is None:
+        for testdir in os.getenv("PATH", "").split(os.pathsep):
+            if os.path.isfile(os.path.join(testdir, executable_name)):
+                root = os.path.dirname(testdir)
+                break
+        if root is None:
+            raise RuntimeError(error_msg)
+    return root
+
 class PythonAdapter():
     """Builds the command line for a tracker integrated through the Python TraX wrapper."""
 
@@ -72,8 +95,7 @@ class PythonAdapter():
         :param kwargs: Additional keyword arguments for constructor.
 
         :returns: The tracker runtime object."""
-        if not isinstance(paths, list):
-            paths = paths.split(os.pathsep)
+        paths = split_paths(paths)
 
         pathimport = " ".join(["sys.path.insert(0, '{}');".format(escape_path(x)) for x in normalize_paths(paths[::-1], tracker)])
         interpreter = sys.executable if python is None else python
@@ -127,8 +149,7 @@ class MatlabAdapter():
         :param kwargs: Additional keyword arguments for constructor.
 
         :returns: The tracker runtime object."""
-        if not isinstance(paths, list):
-            paths = paths.split(os.pathsep)
+        paths = split_paths(paths)
 
         pathimport = " ".join(["addpath('{}');".format(escape_matlab_path(x)) for x in normalize_paths(paths, tracker)])
 
@@ -138,15 +159,9 @@ class MatlabAdapter():
             matlabname = "matlab"
 
         if matlab is None:
-            matlabroot: str | None = os.getenv("MATLAB_ROOT", None)
-            if matlabroot is None:
-                testdirs = os.getenv("PATH", "").split(os.pathsep)
-                for testdir in testdirs:
-                    if os.path.isfile(os.path.join(testdir, matlabname)):
-                        matlabroot = os.path.dirname(testdir)
-                        break
-                if matlabroot is None:
-                    raise RuntimeError("Matlab executable not found, set MATLAB_ROOT environmental variable manually.")
+            matlabroot = find_executable_root(
+                "MATLAB_ROOT", matlabname,
+                "Matlab executable not found, set MATLAB_ROOT environmental variable manually.")
             matlab_executable = os.path.join(matlabroot, 'bin', matlabname)
         else:
             matlab_executable = matlab
@@ -203,8 +218,7 @@ class OctaveAdapter():
 
         :returns: The tracker runtime object."""
 
-        if not isinstance(paths, list):
-            paths = paths.split(os.pathsep)
+        paths = split_paths(paths)
 
         pathimport = " ".join(["addpath('{}');".format(escape_matlab_path(x)) for x in normalize_paths(paths, tracker)])
 
@@ -214,15 +228,9 @@ class OctaveAdapter():
             octavename = "octave"
 
         if octave is None:
-            octaveroot: str | None = os.getenv("OCTAVE_ROOT", None)
-            if octaveroot is None:
-                testdirs = os.getenv("PATH", "").split(os.pathsep)
-                for testdir in testdirs:
-                    if os.path.isfile(os.path.join(testdir, octavename)):
-                        octaveroot = os.path.dirname(testdir)
-                        break
-                if octaveroot is None:
-                    raise RuntimeError("Octave executable not found, set OCTAVE_ROOT environmental variable manually.")
+            octaveroot = find_executable_root(
+                "OCTAVE_ROOT", octavename,
+                "Octave executable not found, set OCTAVE_ROOT environmental variable manually.")
             octave_executable = os.path.join(octaveroot, 'bin', octavename)
         else:
             octave_executable = octave

@@ -2,9 +2,7 @@
 from typing import Any, Iterable
 
 import subprocess
-import shlex
 import shutil
-import sys
 import os
 import time
 import tempfile
@@ -15,7 +13,7 @@ from vot.region import Region, Mask, Rectangle, Point, Polygon
 from vot.region.io import parse_region
 from vot.tracker import Tracker, TrackerRuntime, ObjectQuery, ObjectStatus, RunQueries, RunResult
 from vot.dataset import Frame
-from vot.tracker.helpers import convert_region
+from vot.tracker.helpers import convert_region, spawn_process
 
 def make_temporary_folder() -> str:
     """Creates a temporary folder and returns its path."""
@@ -180,23 +178,7 @@ class TrackerFolderRuntime(TrackerRuntime):
         
         log_debug(f"Running tracker with command: {self._command} in folder: {self.folder}")
         
-        if sys.platform.startswith("win"):
-            process = subprocess.Popen(
-                    self._command,
-                    cwd=self.folder,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    env=environment, bufsize=0, close_fds=False)
-        else:
-            process = subprocess.Popen(
-                    shlex.split(self._command),
-                    shell=False,
-                    cwd=self.folder,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    env=environment, bufsize=0, close_fds=False)
+        process = spawn_process(self._command, self.folder, environment)
         try:
             
             output_data, _ = process.communicate(timeout=timeout)

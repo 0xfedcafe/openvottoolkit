@@ -1,6 +1,7 @@
 """Common functions for document generation."""
 import os
 import math
+from collections.abc import Iterator
 
 from attributee import String
 
@@ -22,6 +23,12 @@ def read_resource(name: str) -> str:
 def per_tracker(a: Analysis) -> bool:
     """Returns true if the analysis is per-tracker."""
     return a.axes == Axes.TRACKERS
+
+def _iter_measures(descriptions: list) -> Iterator[tuple[int, Measure]]:
+    """Yields ``(index, description)`` for each non-None :class:`Measure` description."""
+    for i, description in enumerate(descriptions):
+        if isinstance(description, Measure):
+            yield i, description
 
 def extract_measures_table(trackers: list[Tracker], results: dict) -> Table:
     """Extracts a table of measures from the results. The table is a list of lists,
@@ -48,14 +55,11 @@ def extract_measures_table(trackers: list[Tracker], results: dict) -> Table:
             if not per_tracker(analysis):
                 continue
 
-            for i, description in enumerate(descriptions):
-                if description is None:
-                    continue
-                if isinstance(description, Measure):
-                    table_header[0].append(experiment)
-                    table_header[1].append(analysis)
-                    table_header[2].append(description)
-                    column_order.append(description.direction)
+            for i, description in _iter_measures(descriptions):
+                table_header[0].append(experiment)
+                table_header[1].append(analysis)
+                table_header[2].append(description)
+                column_order.append(description.direction)
 
             if aresults is None:
                 continue
@@ -64,11 +68,8 @@ def extract_measures_table(trackers: list[Tracker], results: dict) -> Table:
                 if not tracker in table_data:
                     table_data[tracker] = list()
                 
-                for i, description in enumerate(descriptions):
-                    if description is None:
-                        continue
-                    if isinstance(description, Measure):
-                        table_data[tracker].append(values[i] if not values is None else None)
+                for i, description in _iter_measures(descriptions):
+                    table_data[tracker].append(values[i] if not values is None else None)
 
     table_order = []
 
@@ -204,7 +205,7 @@ class StackAnalysesPlots(SeparableReport):
 
         from vot.report.common import extract_plots
 
-        analyses = [analysis for analysis in experiment.analyses if analysis.compatible(experiment)]            
+        analyses = experiment.compatible_analyses()
 
         results = {a: r for a, r in zip(analyses, await self.process(analyses, experiment, trackers, sequences))}
 
@@ -227,7 +228,7 @@ class StackAnalysesTable(Report):
         results = dict()
 
         for experiment in experiments:
-            analyses = [analysis for analysis in experiment.analyses if analysis.compatible(experiment)]            
+            analyses = experiment.compatible_analyses()
             results[experiment] = {a: r for a, r in zip(analyses, await self.process(analyses, experiment, trackers, sequences))}
 
         table = extract_measures_table(trackers, results)
@@ -249,11 +250,9 @@ class SequenceSpeedPlots(SeparableReport):
         from vot.report import LinePlot
 
         analysis = SequenceSpeed(skip_initial=int(self.skip_initial))
-        analysis_result = await self.process([analysis], experiment, trackers, sequences)
-        if isinstance(analysis_result, dict):
+        results = await self._single_result(analysis, experiment, trackers, sequences)
+        if results is None:
             return []
-
-        results = next(iter(analysis_result))
 
         plots = []
         for s, sequence in enumerate(sequences):
@@ -294,11 +293,9 @@ class SequenceFailureCurvePlots(SeparableReport):
         from vot.analysis.failures import SequenceFailureCurve
         from vot.report import LinePlot
 
-        analysis_result = await self.process([SequenceFailureCurve()], experiment, trackers, sequences)
-        if isinstance(analysis_result, dict):
+        results = await self._single_result(SequenceFailureCurve(), experiment, trackers, sequences)
+        if results is None:
             return []
-
-        results = next(iter(analysis_result))
 
         # Cell layout: (cumulative_crashes, cumulative_robustness, cumulative_total, frame_count)
         specs = [(0, "Cumulative crashes", "crashes"),
@@ -340,11 +337,9 @@ class SequenceOverlapPlots(SeparableReport):
         from vot.analysis.accuracy import Overlaps
         from vot.report import LinePlot
 
-        analysis_result = await self.process([Overlaps(ignore_masks=self.ignore_masks)], experiment, trackers, sequences)
-        if isinstance(analysis_result, dict):
+        results = await self._single_result(Overlaps(ignore_masks=self.ignore_masks), experiment, trackers, sequences)
+        if results is None:
             return []
-
-        results = next(iter(analysis_result))
 
         plots = []
         

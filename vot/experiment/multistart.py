@@ -47,6 +47,13 @@ class MultiStartExperiment(Experiment):
 
     anchor = String(default="anchor")
 
+    def _find_validated_anchors(self, sequence: Sequence) -> tuple[list[int], list[int]]:
+        """Forward and backward anchor frames, raising if the sequence has none."""
+        forward, backward = find_anchors(sequence, self.anchor)
+        if len(forward) == 0 and len(backward) == 0:
+            raise RuntimeError("Sequence does not contain any anchors")
+        return forward, backward
+
     def scan(self, tracker: Tracker, sequence: Sequence) -> tuple:
         """Scan the results of the experiment for the given tracker and sequence.
 
@@ -63,10 +70,7 @@ class MultiStartExperiment(Experiment):
 
         results = self.results(tracker, sequence)
 
-        forward, backward = find_anchors(sequence, self.anchor)
-
-        if len(forward) == 0 and len(backward) == 0:
-            raise RuntimeError("Sequence does not contain any anchors")
+        forward, backward = self._find_validated_anchors(sequence)
 
         for i in forward + backward:
             name = f"{sequence.name}_{i:08d}"
@@ -140,10 +144,7 @@ class MultiStartExperiment(Experiment):
 
         results = self.results(tracker, sequence)
 
-        forward, backward = find_anchors(sequence, self.anchor)
-
-        if len(forward) == 0 and len(backward) == 0:
-            raise RuntimeError("Sequence does not contain any anchors")
+        forward, backward = self._find_validated_anchors(sequence)
 
         total = len(forward) + len(backward)
         current = 0

@@ -285,58 +285,56 @@ class Tracker(object):
     """Tracker definition class."""
 
     @staticmethod
-    def _collect_envvars(**kwargs: Any) -> tuple[dict, dict]:
-        """Collects environment variables from the keyword arguments.
+    def _collect_prefixed(
+        prefix: str,
+        bulk_key: str,
+        kwargs: dict[str, Any],
+        transform_key: Callable[[str], str] = str.lower,
+        transform_value: Callable[[Any], Any] = lambda v: v,
+    ) -> tuple[dict, dict]:
+        """Split ``kwargs`` into one collection and the rest.
 
-        :param **kwargs: Keyword arguments.
+        Entries arrive either as a bulk ``bulk_key`` dict (keys kept verbatim) or as
+        individual ``prefix``-prefixed keys (stripped of the prefix and passed through
+        ``transform_key``); all values pass through ``transform_value``.
 
-        :returns: Tuple of environment variables and other keyword arguments.
+        :returns: Tuple of the collection and the remaining keyword arguments.
         :rtype: tuple"""
-        envvars = dict()
+        collected = dict()
         other = dict()
 
-        if "env" in kwargs:
-            if isinstance(kwargs["env"], dict):
-                envvars.update({k: os.path.expandvars(v) for k, v in kwargs["env"].items()})
-            del kwargs["env"]
+        if bulk_key in kwargs:
+            if isinstance(kwargs[bulk_key], dict):
+                collected.update({k: transform_value(v) for k, v in kwargs[bulk_key].items()})
+            del kwargs[bulk_key]
 
         for name, value in kwargs.items():
-            if name.startswith("env_") and len(name) > 4:
-                envvars[name[4:].upper()] = os.path.expandvars(value)
+            if name.startswith(prefix) and len(name) > len(prefix):
+                collected[transform_key(name[len(prefix):])] = transform_value(value)
             else:
                 other[name] = value
 
-        return envvars, other
+        return collected, other
+
+    @staticmethod
+    def _collect_envvars(**kwargs: Any) -> tuple[dict, dict]:
+        """Collects environment variables from the keyword arguments.
+
+        :returns: Tuple of environment variables and other keyword arguments.
+        :rtype: tuple"""
+        return Tracker._collect_prefixed("env_", "env", kwargs, str.upper, os.path.expandvars)
 
     @staticmethod
     def _collect_arguments(**kwargs: Any) -> tuple[dict, dict]:
         """Collects arguments from the keyword arguments.
 
-        :param **kwargs: Keyword arguments.
-
         :returns: Tuple of arguments and other keyword arguments.
         :rtype: tuple"""
-        arguments = dict()
-        other = dict()
-
-        if "arguments" in kwargs:
-            if isinstance(kwargs["arguments"], dict):
-                arguments.update(kwargs["arguments"])
-            del kwargs["arguments"]
-
-        for name, value in kwargs.items():
-            if name.startswith("arg_") and len(name) > 4:
-                arguments[name[4:].lower()] = value
-            else:
-                other[name] = value
-
-        return arguments, other
+        return Tracker._collect_prefixed("arg_", "arguments", kwargs)
 
     @staticmethod
     def _collect_metadata(**kwargs: Any) -> tuple[dict, dict]:
         """Collects metadata from the keyword arguments.
-
-        :param **kwargs: Keyword arguments.
 
         :returns: Tuple of metadata and other keyword arguments.
         :rtype: tuple
@@ -344,21 +342,7 @@ class Tracker(object):
             >>> Tracker._collect_metadata(meta_author="John Doe", meta_year=2018)
             ({'author': 'John Doe', 'year': 2018}, {})
         """
-        metadata = dict()
-        other = dict()
-
-        if "metadata" in kwargs:
-            if isinstance(kwargs["metadata"], dict):
-                metadata.update(kwargs["metadata"])
-            del kwargs["metadata"]
-
-        for name, value in kwargs.items():
-            if name.startswith("meta_") and len(name) > 5:
-                metadata[name[5:].lower()] = value
-            else:
-                other[name] = value
-
-        return metadata, other
+        return Tracker._collect_prefixed("meta_", "metadata", kwargs)
 
     def __init__(self, _identifier: str, _source: str, command: str, protocol: str | None = None, label: str | None = None, version: str | None = None, tags: str | list[str] | None = None, storage: str | None = None, **kwargs: Any) -> None:
         """Initializes the tracker definition.

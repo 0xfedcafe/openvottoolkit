@@ -920,7 +920,7 @@ class AnalysisProcessor(object):
 
 def process_stack_analyses(
     workspace: "Workspace",
-    trackers: Tracker | list[Tracker],
+    trackers: TrackersArg,
     sequences: list[str] | None = None,
     experiments: list[str] | None = None,
 ) -> dict[Experiment, dict[Analysis, Grid | None]] | None:
@@ -962,8 +962,7 @@ def process_stack_analyses(
                 condition.notify()
         return insert
 
-    # Normalize ``trackers`` to a list so it can be passed straight through to commit().
-    trackers_list: list[Tracker] = [trackers] if isinstance(trackers, Tracker) else list(trackers)
+    trackers_list: list[Tracker] = _as_list_trackers(trackers)
 
     assert experiments is None or isinstance(experiments, list)
     assert sequences is None or isinstance(sequences, list)

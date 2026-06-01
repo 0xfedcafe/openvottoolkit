@@ -119,14 +119,7 @@ class ReferralSequenceAccuracy(SeparableAnalysis):
 
         W, H = sequence.size
 
-        frame_mask: list[bool] | None
-        if self.filter_tag is not None:
-            frame_mask = [self.filter_tag in sequence.tags(i)
-                          for i in range(len(sequence))]
-            if not any(frame_mask):
-                frame_mask = None
-        else:
-            frame_mask = None
+        frame_mask = sequence.tag_mask(self.filter_tag, collapse_empty=True)
 
         # Pre-render GT and ignore masks once (shared across prompts).
         gt_arrays: list[npt.NDArray | None] = []
