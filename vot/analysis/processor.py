@@ -983,7 +983,7 @@ def process_stack_analyses(
 
         results[experiment] = experiment_results
 
-        experiment_sequences = experiment.transform(selected_sequences)
+        experiment_sequences = experiment.transform(experiment.select(selected_sequences))
 
         for analysis in experiment.analyses:
 

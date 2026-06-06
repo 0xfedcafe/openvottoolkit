@@ -178,11 +178,16 @@ def do_evaluate(config: argparse.Namespace) -> None:
         logger.error("No experiments found, stopping.")
         return
 
+    sequences = list(workspace.dataset)
+    if config.sequences:
+        selected = config.sequences.split(",")
+        sequences = [sequence for sequence in sequences if sequence.name in selected]
+
     try:
         for tracker in trackers:
             logger.debug("Evaluating tracker %s", tracker.identifier)
             for experiment in experiments:
-                run_experiment(experiment, tracker, list(workspace.dataset), config.force, config.persist)
+                run_experiment(experiment, tracker, experiment.select(sequences), config.force, config.persist)
 
         logger.info("Evaluation concluded successfuly")
 
@@ -335,7 +340,7 @@ def do_pack(config: argparse.Namespace) -> None:
     with Progress("Scanning", len(workspace.dataset) * len(workspace.stack)) as progress:
 
         for experiment in workspace.stack:
-            sequences = experiment.transform(list(workspace.dataset))
+            sequences = experiment.transform(experiment.select(list(workspace.dataset)))
             for sequence in sequences:
                 complete, files, results = experiment.scan(tracker, sequence)
                 all_files.extend([(f, experiment.identifier, sequence.name, results) for f in files])
@@ -567,6 +572,7 @@ def main() -> None:
     evaluate_parser.add_argument("--persist", "-p", default=False, help="Persist execution even in case of an error", required=False, action='store_true')
     evaluate_parser.add_argument("--workspace", default=os.getcwd(), help='Workspace path')
     evaluate_parser.add_argument("--experiments", default=None, help='Filter specified experiments (comma separated names)', required=False)
+    evaluate_parser.add_argument("--sequences", default=None, help='Filter specified sequences (comma separated names)', required=False)
 
     analysis_parser = subparsers.add_parser('analysis', aliases=["analyse", "analyze"], help='Run analysis of results')
     analysis_parser.add_argument("trackers", nargs='*', help='Tracker identifiers')

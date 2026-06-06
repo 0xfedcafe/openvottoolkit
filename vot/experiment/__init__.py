@@ -8,7 +8,7 @@ from datetime import datetime
 from abc import abstractmethod
 from typing import Any, Callable, TYPE_CHECKING
 
-from attributee import Attributee, Object, Integer, Float, Nested, List, Boolean
+from attributee import Attributee, Object, Integer, Float, Nested, List, Boolean, String
 
 from vot.tracker import TrackerException, ObjectStatus
 from vot.utilities import Progress, to_number, Registry
@@ -106,6 +106,7 @@ class Experiment(Attributee):
     inject = Nested(InjectConfig, default=None)
     transformers = List(Object(transformer_resolver), default=[])
     analyses = List(Object(analysis_resolver), default=[])
+    sequences = List(String(), default=[], description="Dataset sequence names or glob patterns this experiment runs on (empty = all)")
     ignore_special = Boolean(default=True, description="Ignore special objects in experiment")
 
     def __init__(self, _identifier: str, _storage: "Storage", **kwargs):
@@ -287,6 +288,27 @@ class Experiment(Attributee):
             sequences = [IgnoreSpecialObjects(sequence) for sequence in sequences]
 
         return sequences
+
+    def select(self, sequences: "list[Sequence]") -> "list[Sequence]":
+        """Restrict a dataset to this experiment's configured ``sequences``.
+
+        Each configured entry is matched against sequence names as a shell-style glob, so
+        a bare name matches exactly and ``prefix*`` matches a family. An empty configuration
+        (the default) selects the whole dataset, i.e. every experiment runs on all sequences.
+
+        Applied before :meth:`transform`, at the boundary where the workspace dataset is
+        handed to an experiment, so an experiment never touches sequences it lacks results for.
+
+        :param sequences: Candidate sequences, typically the whole workspace dataset.
+
+        :returns: The matching subset, in input order."""
+        from fnmatch import fnmatch
+
+        patterns = list(self.sequences)
+        if not patterns:
+            return list(sequences)
+        return [sequence for sequence in sequences
+                if any(fnmatch(sequence.name, pattern) for pattern in patterns)]
 
 from .multirun import UnsupervisedExperiment, SupervisedExperiment
 from .multistart import MultiStartExperiment
