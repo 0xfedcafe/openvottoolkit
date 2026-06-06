@@ -4,10 +4,11 @@ This module is used to generate HTML reports from the results of the experiments
 """
 import os
 import io
+import json
 import datetime
 
 import dominate
-from dominate.tags import h1, h2, table, thead, tbody, tr, th, td, div, p, li, ol, ul, span, style, link, script, video, a
+from dominate.tags import h1, h2, table, thead, tbody, tr, th, td, div, li, ol, ul, span, style, link, script, video, a, button, label, input_, meta
 from dominate.util import raw, text
 
 from vot import toolkit_version, check_debug, get_logger
@@ -15,7 +16,7 @@ from vot.tracker import Tracker
 from vot.dataset import Sequence
 from vot.workspace import Storage
 from vot.report.common import format_value, read_resource, merge_repeats
-from vot.report import StyleManager, Table, Plot, Video
+from vot.report import StyleManager, Table, Plot, Video, VegaSpec
 from vot.utilities import Progress
 from vot.utilities.data import Grid
 
@@ -101,6 +102,18 @@ def generate_html_document(trackers: list[Tracker], sequences: list[Sequence], r
         figure.save(buffer, "SVG")
         raw(buffer.getvalue())
 
+    def insert_vega(item: VegaSpec):
+        """Embeds a Vega-Lite spec live and writes the raw spec next to the report."""
+        spec_json = json.dumps(item.spec)
+        spec_name = item.identifier + ".vl.json"
+        with storage.write(spec_name) as handle:
+            handle.write(spec_json)
+
+        target = "vega_" + item.identifier
+        div(id=target)
+        with script(type="text/javascript"):
+            raw("vegaEmbed('#%s', %s, {actions: true}).catch(console.error);" % (target, spec_json))
+
     def insert_mplfigure(figure):
         """Inserts a matplotlib figure into the document."""
         buffer = io.StringIO()
@@ -130,12 +143,23 @@ def generate_html_document(trackers: list[Tracker], sequences: list[Sequence], r
 
     linked = check_debug()
 
+    has_vega = any(isinstance(item, VegaSpec) for section in reports.values() for item in section)
+
     with doc.head:
+        meta(charset="utf-8")
         add_style("pure.css", linked)
         add_style("report.css", linked)
+        add_style("controls.css", linked)
         add_script("jquery.js", linked)
         add_script("table.js", linked)
         add_script("report.js", linked)
+        add_script("controls.js", linked)
+        if has_vega:
+            # Vega-Lite rendering relies on these CDN bundles (needs network at view time);
+            # the static matplotlib heatmap is the offline fallback for the same data.
+            script(type="text/javascript", src="https://cdn.jsdelivr.net/npm/vega@5")
+            script(type="text/javascript", src="https://cdn.jsdelivr.net/npm/vega-lite@5")
+            script(type="text/javascript", src="https://cdn.jsdelivr.net/npm/vega-embed@6")
 
     # TODO: make table more general (now it assumes a tracker per row)
     def make_table(data: Table):
@@ -163,13 +187,93 @@ def generate_html_document(trackers: list[Tracker], sequences: list[Sequence], r
                             for value, order in zip(row, data.order):
                                 insert_cell(value, order[tracker] if not order is None else None)
 
+    def item_kind(item):
+        """Human-readable analysis subtype used to group/filter an item in the panel."""
+        return item.kind or ("Preview" if isinstance(item, Video) else "Other")
+
+    def vega_identifiers(section):
+        """Identifiers in a section that are rendered live as Vega-Lite."""
+        return {item.identifier for item in section if isinstance(item, VegaSpec)}
+
+    # A matplotlib Plot sharing its identifier with a Vega spec is the static twin kept for
+    # LaTeX/PDF; in HTML the live Vega version is shown instead and the twin is hidden by default.
+    duplicate_ids = set()
+    kinds = []
+    for section in reports.values():
+        vega_ids = vega_identifiers(section)
+        for item in section:
+            if isinstance(item, Table):
+                continue
+            if isinstance(item, Plot) and item.identifier in vega_ids:
+                duplicate_ids.add(item.identifier)
+            kind = item_kind(item)
+            if kind not in kinds:
+                kinds.append(kind)
+    has_duplicates = len(duplicate_ids) > 0
+
+    def make_control_panel():
+        """A sticky panel that doubles as the tracker legend and the visibility filter."""
+        with div(id="control-panel"):
+            with div(cls="cp-bar"):
+                span("Filters", cls="cp-title")
+                button("»", id="cp-collapse", type="button", title="Collapse the panel")
+            with div(cls="cp-content"):
+                with div(cls="cp-section"):
+                    with div(cls="cp-section-head"):
+                        span("Trackers")
+                        with span(cls="cp-actions"):
+                            a("all", data_act="all", data_group="tracker")
+                            text(" · ")
+                            a("none", data_act="none", data_group="tracker")
+                    with ul(cls="cp-list cp-trackers"):
+                        for tracker in trackers:
+                            with li(data_tracker=legend.number(tracker)):
+                                with span(cls="cp-swatch"):
+                                    insert_mplfigure(legend.figure(tracker))
+                                span(tracker.label, cls="cp-label")
+                with div(cls="cp-section"):
+                    with div(cls="cp-section-head"):
+                        span("Analyses")
+                        with span(cls="cp-actions"):
+                            a("all", data_act="all", data_group="kind")
+                            text(" · ")
+                            a("none", data_act="none", data_group="kind")
+                    with ul(cls="cp-list cp-kinds"):
+                        for kind in kinds:
+                            with li(data_kind=kind):
+                                span(kind, cls="cp-label")
+                if has_duplicates:
+                    with label(cls="cp-check"):
+                        input_(type="checkbox", id="cp-mpl-dup")
+                        text(" Static heatmap duplicates")
+
+    def insert_item(item):
+        """Wraps a plot/video/spec in a collapsible, filterable container."""
+        duplicate = isinstance(item, Plot) and item.identifier in duplicate_ids
+        classes = ["report-item", "video" if isinstance(item, Video) else "plot"]
+        if duplicate:
+            classes.append("mpl-duplicate")
+        with div(cls=" ".join(classes), data_kind=item_kind(item), data_identifier=item.identifier):
+            with div(cls="item-head"):
+                button("×", cls="item-collapse", type="button", title="Hide or show this item")
+                span(item.identifier, cls="item-title")
+            with div(cls="item-body"):
+                if isinstance(item, Video):
+                    insert_video(item)
+                elif isinstance(item, VegaSpec):
+                    insert_vega(item)
+                else:
+                    insert_figure(item)
+
     metadata = metadata or dict()
     metadata["Version"] = toolkit_version()
     metadata["Created"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     metadata["Trackers"] = ", ".join([tracker.label for tracker in trackers])
-    metadata["Sequences"] = ", ".join([sequence.name for sequence in sequences])
+    metadata.setdefault("Sequences", ", ".join([sequence.name for sequence in sequences]))
 
     with doc:
+
+        make_control_panel()
 
         with div(id="wrapper"):
 
@@ -195,14 +299,8 @@ def generate_html_document(trackers: list[Tracker], sequences: list[Sequence], r
                 for item in section:
                     if isinstance(item, Table):
                         make_table(item)
-                    elif isinstance(item, Plot):
-                        with div(cls="plot"):
-                            p(item.identifier)
-                            insert_figure(item)
-                    elif isinstance(item, Video):
-                        with div(cls="video"):
-                            p(item.identifier)
-                            insert_video(item)
+                    elif isinstance(item, (Plot, Video, VegaSpec)):
+                        insert_item(item)
                     else:
                         logger.warning("Unsupported report item type %s", item)
 

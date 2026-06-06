@@ -13,7 +13,7 @@ from vot.tracker import Tracker
 from vot.dataset import Sequence
 from vot.workspace import Storage
 from vot.report.common import format_value, read_resource, merge_repeats
-from vot.report import StyleManager, Plot, Table
+from vot.report import StyleManager, Plot, Table, VegaSpec
 
 TRACKER_GROUP = "default"
 
@@ -98,6 +98,10 @@ def generate_latex_document(
     doc.preamble.append(Package('pgf'))
     doc.preamble.append(Package('xcolor'))
     doc.preamble.append(Package('fullpage'))
+    # Place figures inline ([H]) rather than floating: reports emit many figures
+    # with little surrounding text, which overflows LaTeX's ~18-float queue
+    # ("Too many unprocessed floats"). The float package provides [H].
+    doc.preamble.append(Package('float'))
 
     doc.preamble.append(NoEscape(read_resource("commands.tex")))
 
@@ -151,7 +155,7 @@ def generate_latex_document(
                 make_table(doc, item)
             elif isinstance(item, Plot):
                 plot = item
-                with doc.create(Figure(position='htbp')) as container:
+                with doc.create(Figure(position='H')) as container:
                     if multipart:
                         plot_name = plot.identifier + ".pdf"
                         with storage.write(plot_name, binary=True) as out:
@@ -160,6 +164,9 @@ def generate_latex_document(
                     else:
                         container.append(insert_figure(plot))
                     container.add_caption(plot.identifier)
+            elif isinstance(item, VegaSpec):
+                # Vega-Lite is HTML-only; the matplotlib Plot twin carries this to LaTeX.
+                continue
             else:
                 logger.warning("Unsupported report item type %s", item)
 

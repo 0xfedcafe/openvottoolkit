@@ -130,16 +130,16 @@ def extract_plots(trackers: list[Tracker], results: dict, order: list[int] | Non
                     ylim = (description.minimal(1), description.maximal(1))
                     xlabel = description.label(0)
                     ylabel = description.label(1)
-                    plot = ScatterPlot(plot_identifier, xlabel, ylabel, xlim, ylim, description.trait)
+                    plot = ScatterPlot(plot_identifier, xlabel, ylabel, xlim, ylim, description.trait, kind=analysis.title)
                 elif isinstance(description, AnalysisPlot):
                     ylim = (description.minimal, description.maximal)
-                    plot = LinePlot(plot_identifier, description.wrt, description.name, None, ylim, description.trait)
+                    plot = LinePlot(plot_identifier, description.wrt, description.name, None, ylim, description.trait, kind=analysis.title)
                 elif isinstance(description, Curve) and description.dimensions == 2:
                     xlim = (description.minimal(0), description.maximal(0))
                     ylim = (description.minimal(1), description.maximal(1))
                     xlabel = description.label(0)
                     ylabel = description.label(1)
-                    plot = LinePlot(plot_identifier, xlabel, ylabel, xlim, ylim, description.trait)
+                    plot = LinePlot(plot_identifier, xlabel, ylabel, xlim, ylim, description.trait, kind=analysis.title)
                 else:
                     continue
 
@@ -207,7 +207,9 @@ class StackAnalysesPlots(SeparableReport):
 
         analyses = experiment.compatible_analyses()
 
-        results = {a: r for a, r in zip(analyses, await self.process(analyses, experiment, trackers, sequences))}
+        # ``sequences`` are already selected+transformed by SeparableReport.generate;
+        # commit without re-transforming (see Report._commit).
+        results = {a: r for a, r in zip(analyses, await self._commit(analyses, experiment, trackers, sequences))}
 
         # Plot in reverse order, with best trackers on top
         z_order = list(reversed(range(len(trackers))))
@@ -258,7 +260,7 @@ class SequenceSpeedPlots(SeparableReport):
         for s, sequence in enumerate(sequences):
             plot = LinePlot(
                 "fps_%s_%s" % (experiment.identifier, sequence.name),
-                "Frame", "FPS", (0, None), (0, None), "fps",
+                "Frame", "FPS", (0, None), (0, None), "fps", kind="FPS",
             )
             for t, tracker in enumerate(trackers):
                 cell = results[t, s]
@@ -307,7 +309,7 @@ class SequenceFailureCurvePlots(SeparableReport):
             for index, ylabel, tag in specs:
                 plot = LinePlot(
                     "%s_%s_%s" % (tag, experiment.identifier, sequence.name),
-                    "Frame", ylabel, (0, len(sequence)), (0, None), None,
+                    "Frame", ylabel, (0, len(sequence)), (0, None), None, kind=ylabel,
                 )
                 for t, tracker in enumerate(trackers):
                     cell = results[t, s]
@@ -344,7 +346,7 @@ class SequenceOverlapPlots(SeparableReport):
         plots = []
         
         for s, sequence in enumerate(sequences):
-            plot = LinePlot("overlap_%s_%s" % (experiment.identifier, sequence.name), "Frame", "Overlap", (0, len(sequence)), (0, 1), None)
+            plot = LinePlot("overlap_%s_%s" % (experiment.identifier, sequence.name), "Frame", "Overlap", (0, len(sequence)), (0, 1), None, kind="Overlap")
             
             for t, tracker in enumerate(trackers):
                 cell = results[t, s]

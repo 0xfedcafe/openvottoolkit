@@ -50,7 +50,8 @@ class Plot(object):
     """Base class for all plots."""
 
     def __init__(self, identifier: str, xlabel: str | None, ylabel: str | None,
-        xlimits: AxisLimits, ylimits: AxisLimits, trait: str | None = None) -> None:
+        xlimits: AxisLimits, ylimits: AxisLimits, trait: str | None = None,
+        kind: str | None = None) -> None:
         """Initializes the plot.
 
         :param identifier: The identifier of the plot.
@@ -59,9 +60,11 @@ class Plot(object):
         :param xlimits: The limits of the x axis.
         :param ylimits: The limits of the y axis.
         :param trait: The trait of the plot.
+        :param kind: Human-readable analysis subtype, used to group/filter items in the report.
         """
 
         self._identifier = identifier
+        self._kind = kind
         self._xlimits = xlimits
         self._ylimits = ylimits
 
@@ -151,10 +154,16 @@ class Plot(object):
         """Returns the identifier of the plot."""
         return self._identifier
 
+    @property
+    def kind(self) -> str | None:
+        """Returns the analysis subtype used to group/filter the plot in the report."""
+        return self._kind
+
 class Video(object):
     """Base class for all videos."""
 
-    def __init__(self, identifier: str, frames: FrameList, fps: int = 30, trait: str | None = None) -> None:
+    def __init__(self, identifier: str, frames: FrameList, fps: int = 30, trait: str | None = None,
+        kind: str | None = None) -> None:
         """Initializes the video object.
 
         :param identifier: The identifier of the video.
@@ -165,9 +174,11 @@ class Video(object):
         :type fps: int
         :param trait: The trait of the video.
         :type trait: str
+        :param kind: Human-readable analysis subtype, used to group/filter items in the report.
         """
 
         self._identifier = identifier
+        self._kind = kind
         self._frames = frames
         self._fps = fps
         self._manager = StyleManager.default()
@@ -286,6 +297,59 @@ class Video(object):
         """Returns the identifier of the plot."""
         return self._identifier
 
+    @property
+    def kind(self) -> str | None:
+        """Returns the analysis subtype used to group/filter the video in the report."""
+        return self._kind
+
+class VegaSpec(object):
+    """A report item carrying a Vega-Lite specification (a plain ``dict``).
+
+    The HTML backend embeds it live via vega-embed and also writes the raw
+    ``<identifier>.vl.json`` next to the report so the spec can be reused or
+    tweaked by hand. Backends that cannot render Vega-Lite (e.g. LaTeX) ignore
+    it; pair it with an equivalent :class:`Plot` so those backends still show
+    the figure.
+    """
+
+    def __init__(self, identifier: str, spec: dict, kind: str | None = None) -> None:
+        """:param identifier: Identifier of the item (also the spec file stem).
+        :param spec: The Vega-Lite specification as a dictionary.
+        :param kind: Human-readable analysis subtype, used to group/filter items in the report."""
+        self._identifier = identifier
+        self._kind = kind
+        self._spec = spec
+
+    @property
+    def identifier(self) -> str:
+        """Returns the identifier of the spec."""
+        return self._identifier
+
+    @property
+    def kind(self) -> str | None:
+        """Returns the analysis subtype used to group/filter the spec in the report."""
+        return self._kind
+
+    @property
+    def spec(self) -> dict:
+        """Returns the Vega-Lite specification dictionary."""
+        return self._spec
+
+class Coverage:
+    """Non-visual marker recording which sequences a report drew for an experiment.
+
+    A report item that narrows beyond the experiment's own selection (e.g. a heatmap
+    restricted to a name pattern) emits this so the document header can list exactly what
+    was rendered instead of the whole dataset. :func:`generate_document` harvests and
+    removes these before the report is written.
+    """
+
+    def __init__(self, experiment: str, sequences: list[str]) -> None:
+        """:param experiment: Identifier of the experiment the sequences belong to.
+        :param sequences: Names of the sequences the item actually used."""
+        self.experiment = experiment
+        self.sequences = list(sequences)
+
 class ScatterPlot(Plot):
     """A scatter plot."""
 
@@ -295,7 +359,8 @@ class ScatterPlot(Plot):
             return
 
         style = self._manager.plot_style(key)
-        self._axes.scatter(data[0], data[1], **style.point_style())
+        gid = "vottracker_%d" % self._manager.legend(key).number(key)
+        self._axes.scatter(data[0], data[1], gid=gid, **style.point_style())
 
 class LinePlot(Plot):
     """A line plot."""
@@ -315,8 +380,9 @@ class LinePlot(Plot):
             x = range(len(data))
 
         style = self._manager.plot_style(key)
+        gid = "vottracker_%d" % self._manager.legend(key).number(key)
 
-        self._axes.plot(x, y, **style.line_style())
+        self._axes.plot(x, y, gid=gid, **style.line_style())
 
 class ObjectVideo(Video):
 
@@ -499,6 +565,10 @@ class Legend(object):
             self._counter += 1
         return self._mapping[key]
 
+    def number(self, key) -> int:
+        """Returns the stable style index assigned to a key (assigning one on first use)."""
+        return self._number(key)
+
     def __getitem__(self, key) -> PlotStyle:
         """Returns the style for a key."""
         number = self._number(key)
@@ -641,7 +711,7 @@ class TrackerSorter(Attributee):
             raise RuntimeError(f"Analysis not found {self.analysis} in experiment {self.experiment}")
 
         try:
-            sequences = experiment.transform(sequences)
+            sequences = experiment.transform(experiment.select(sequences))
             future = analysis.commit(experiment, trackers, sequences)
             result = future.result()
         except AnalysisError as e:
@@ -662,9 +732,25 @@ class Report(Attributee):
         raise NotImplementedError()
 
     async def process(self, analyses: list["Analysis"], experiment: "Experiment", trackers: list["Tracker"], sequences: list["Sequence"]) -> typing.Iterable[typing.Any]:
+        """Select + transform the raw workspace ``sequences`` for ``experiment``, then
+        commit the analyses. This is the entry point for callers that hold the raw
+        dataset (a :class:`Report` that overrides :meth:`generate`, e.g. the table).
 
-        sequences = experiment.transform(sequences)
+        :class:`SeparableReport` must NOT route through here: it has already
+        selected+transformed in :meth:`SeparableReport.generate` before calling
+        ``perexperiment``, so it commits via :meth:`_commit` to transform only once.
+        """
+        sequences = experiment.transform(experiment.select(sequences))
+        return await self._commit(analyses, experiment, trackers, sequences)
 
+    async def _commit(self, analyses: list["Analysis"], experiment: "Experiment", trackers: list["Tracker"], sequences: list["Sequence"]) -> typing.Iterable[typing.Any]:
+        """Commit analyses on sequences that are ALREADY selected and transformed.
+
+        Kept separate from :meth:`process` so the :class:`SeparableReport` path never
+        transforms a second time: a transformer that splits or resizes sequences would
+        otherwise be applied twice here, producing sequences that were never evaluated
+        (→ ``MissingResultsException``) and plot ranges misaligned with the result grid.
+        """
         if not isinstance(analyses, collections.abc.Iterable):
             analyses = [analyses]
 
@@ -681,9 +767,14 @@ class Report(Attributee):
         return (future.result() for future in futures)
 
     async def _single_result(self, analysis: "Analysis", experiment: "Experiment", trackers: list["Tracker"], sequences: list["Sequence"]) -> typing.Any:
-        """Run a single analysis via :meth:`process` and return its sole result, or
-        ``None`` when there was nothing to compute (``process`` yielded no futures)."""
-        analysis_result = await self.process([analysis], experiment, trackers, sequences)
+        """Run a single analysis and return its sole result, or ``None`` when there was
+        nothing to compute (no futures).
+
+        Commits via :meth:`_commit` (no transform): the only callers are
+        :meth:`SeparableReport.perexperiment` implementations, whose ``sequences`` were
+        already selected+transformed once in :meth:`SeparableReport.generate`.
+        """
+        analysis_result = await self._commit([analysis], experiment, trackers, sequences)
         if isinstance(analysis_result, dict):
             return None
         return next(iter(analysis_result))
@@ -707,7 +798,7 @@ class SeparableReport(Report):
 
         for experiment in experiments:
 
-            tsequences = experiment.transform(sequences)
+            tsequences = experiment.transform(experiment.select(sequences))
 
             if self.compatible(experiment):
                 futures.append(ensure_future(self.perexperiment(experiment, trackers, tsequences)))
@@ -890,7 +981,46 @@ def generate_document(workspace: "Workspace", trackers: list[Tracker], format: s
                         with storage.write(key + "_" + item.identifier + '.avi', binary=True) as out:
                             item.save(out, "avi")
 
+        # Header sequence listing: report exactly what each experiment contributed, grouped
+        # per experiment, rather than dumping the whole dataset. A report item that narrows
+        # beyond the experiment's own selection (e.g. a name-filtered heatmap) emits a
+        # Coverage marker naming the sequences it actually drew; harvest and strip them here.
+        coverage: dict[str, list[str]] = {}
+        for section in reports.values():
+            kept = []
+            for item in section:
+                if isinstance(item, Coverage):
+                    names = coverage.setdefault(item.experiment, [])
+                    names.extend(name for name in item.sequences if name not in names)
+                else:
+                    kept.append(item)
+            section[:] = kept
+
+        # A non-separable report (e.g. the overview table) covers every selected experiment
+        # over its full selection, so when one is present the header is not narrowed.
+        has_global_report = any(not isinstance(report, SeparableReport) for report in index)
+
+        def covered_names(experiment: "Experiment") -> list[str] | None:
+            """Sequence names this experiment contributed to the report, or None if none."""
+            if not has_global_report and experiment.identifier in coverage:
+                return coverage[experiment.identifier]
+            if has_global_report or experiment.identifier in reports:
+                return [sequence.name for sequence in experiment.select(sequences)]
+            return None
+
+        sequence_groups: list[str] = []
+        sequence_union: list[str] = []
+        for experiment in experiments:
+            names = covered_names(experiment)
+            if not names:
+                continue
+            sequence_union.extend(name for name in names if name not in sequence_union)
+            shown = ", ".join(names) if len(names) <= 3 else "{} … {}".format(names[0], names[-1])
+            sequence_groups.append("{}: {} ({})".format(experiment.identifier, len(names), shown))
+
         metadata = {"Stack": stack.title}
+        if sequence_groups:
+            metadata["Sequences"] = "{} sequences — {}".format(len(sequence_union), "; ".join(sequence_groups))
 
         # Prune empty sections
         reports = {key: section for key, section in reports.items() if len(section) > 0}
