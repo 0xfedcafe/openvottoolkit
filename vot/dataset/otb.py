@@ -9,7 +9,7 @@ import os
 import six
 
 from vot import get_logger
-from vot.dataset import BasedSequence, DatasetException, PatternFileListChannel, SequenceData
+from vot.dataset import BasedSequence, DatasetException, PatternFileListChannel, Sequence, SequenceData
 from vot.utilities import Progress
 from vot.region.io import parse_region
 
@@ -128,15 +128,15 @@ _SEQUENCES = {
     "Vase": {"attributes": ["SV", "FM", "IPR"]},
 }
 
-def _load_sequence(metadata):
+def _load_sequence(metadata: dict) -> SequenceData:
     """Load a sequence from the OTB dataset.
 
     :param metadata: Sequence metadata.
     :type metadata: dict
     """
 
-    channels = {}
-    groundtruth = []
+    channels: dict = {}
+    groundtruth: list = []
 
     attributes = metadata.get("attributes", {})
 
@@ -164,7 +164,7 @@ def _load_sequence(metadata):
 from vot.dataset import sequence_reader
 
 @sequence_reader.register("otb")
-def read_sequence(path: str):
+def read_sequence(path: str) -> Sequence | None:
     """Reads a sequence from OTB dataset. The sequence is identified by the name of the
     folder and the groundtruth_rect.txt file is expected to be present in the folder.
 
@@ -185,7 +185,7 @@ def read_sequence(path: str):
     metadata =  {"attributes": _SEQUENCES[name], "path": path}
     return BasedSequence(name.strip(), _load_sequence, metadata)
 
-def download_otb50(path: str):
+def download_otb50(path: str) -> None:
     """Downloads OTB50 dataset to the given path.
 
     :param path: Path to the dataset folder.
@@ -195,7 +195,7 @@ def download_otb50(path: str):
     dataset = {k: v for k, v in dataset.items() if k in _OTB50_SUBSET}
     _download_dataset(path, dataset)
 
-def download_otb100(path: str):
+def download_otb100(path: str) -> None:
     """Downloads OTB100 dataset to the given path.
 
     :param path: Path to the dataset folder.
@@ -204,7 +204,7 @@ def download_otb100(path: str):
     dataset = _SEQUENCES
     _download_dataset(path, dataset)
 
-def _download_dataset(path: str, dataset: dict):
+def _download_dataset(path: str, dataset: dict) -> None:
     """Downloads the given dataset to the given path.
 
     :param path: Path to the dataset folder.
@@ -226,7 +226,6 @@ def _download_dataset(path: str, dataset: dict):
 
             progress.relative(1)
 
-    # Write sequence list to a list.txt file
-    with open(os.path.join(path, "list.txt"), 'w') as filehandle:
-        for name in dataset.keys():
-            filehandle.write("%s\n" % name)
+    # Write the sequence list index
+    from vot.dataset.layout import SequenceList
+    SequenceList(path).write(dataset.keys())

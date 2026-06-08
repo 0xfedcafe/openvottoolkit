@@ -14,23 +14,25 @@ Per-frame IoU semantics (matches the participant's evaluation pipeline):
     (with ignore mask applied if present).
 """
 
-from typing import List, Tuple, Any
+from typing import Sequence as TSequence, Any
 
 import numpy as np
+import numpy.typing as npt
 
 from attributee import Boolean, Include, String
 
-from vot.analysis import (Measure, MissingResultsException, SequenceAggregator,
+from vot.analysis import (Analysis, Measure, Result, MissingResultsException, SequenceAggregator,
                           Sorting, SeparableAnalysis, is_special)
 from vot.dataset import Sequence
 from vot.experiment import Experiment
 from vot.experiment.referral import ReferralExperiment
+from vot.region import Region, SpecialCode
 from vot.region.shapes import Mask
 from vot.tracker import Tracker
 from vot.utilities.data import Grid
 
 
-def _render_mask(region, height: int, width: int):
+def _render_mask(region: Region | None, height: int, width: int) -> npt.NDArray | None:
     """Render a Region into a (H, W) bool numpy array. Returns None if the
     region cannot be interpreted as a mask (unknown / non-mask shape).
     """
@@ -51,7 +53,8 @@ def _render_mask(region, height: int, width: int):
     return out
 
 
-def _per_frame_iou(gt_mask, pred_mask, ignore_mask=None) -> float:
+def _per_frame_iou(gt_mask: npt.NDArray, pred_mask: npt.NDArray,
+                   ignore_mask: npt.NDArray | None = None) -> float:
     """IoU between two (H, W) bool arrays, applying ignore mask.
 
     Empty-mask convention:
@@ -90,18 +93,18 @@ class ReferralSequenceAccuracy(SeparableAnalysis):
     filter_tag = String(default=None,
         description="Only count frames carrying this tag.")
 
-    def compatible(self, experiment: Experiment):
+    def compatible(self, experiment: Experiment) -> bool:
         return isinstance(experiment, ReferralExperiment)
 
     @property
-    def _title_default(self):
+    def _title_default(self) -> str:
         return "Referral sequence accuracy"
 
-    def describe(self):
+    def describe(self) -> tuple[Result | None, ...]:
         return Measure(self.title, "", 0, 1, Sorting.DESCENDING),
 
     def subcompute(self, experiment: Experiment, tracker: Tracker,
-                   sequence: Sequence, dependencies: List[Grid]) -> Tuple[Any]:
+                   sequence: Sequence, dependencies: list[Grid]) -> tuple[Any, ...]:
         assert isinstance(experiment, ReferralExperiment)
 
         trajectories = experiment.gather(tracker, sequence)
@@ -111,43 +114,48 @@ class ReferralSequenceAccuracy(SeparableAnalysis):
         objects = [o for o in sequence.objects() if not o.startswith("_")]
         assert len(objects) == 1, f"Referral expects single-object sequences, got {objects}"
         groundtruth = sequence.object(objects[0])
+        assert groundtruth is not None, f"Missing groundtruth for object {objects[0]}"
         ignore_regions = sequence.object(self.ignore_masks)
 
         W, H = sequence.size
 
-        if self.filter_tag is not None:
-            frame_mask = [self.filter_tag in sequence.tags(i)
-                          for i in range(len(sequence))]
-            if not any(frame_mask):
-                frame_mask = None
-        else:
-            frame_mask = None
+        frame_mask = sequence.tag_mask(self.filter_tag, collapse_empty=True)
 
         # Pre-render GT and ignore masks once (shared across prompts).
-        gt_arrays: List = []
-        annotated: List[bool] = []
+        gt_arrays: list[npt.NDArray | None] = []
+        annotated: list[bool] = []
         for i, gt in enumerate(groundtruth):
-            if is_special(gt, Sequence.UNKNOWN):
-                gt_arrays.append(None); annotated.append(False); continue
+            if is_special(gt, SpecialCode.UNKNOWN):
+                gt_arrays.append(None)
+                annotated.append(False)
+                continue
             if frame_mask is not None and not frame_mask[i]:
-                gt_arrays.append(None); annotated.append(False); continue
+                gt_arrays.append(None)
+                annotated.append(False)
+                continue
             gt_arrays.append(_render_mask(gt, H, W))
             annotated.append(gt_arrays[-1] is not None)
 
-        ig_arrays = [None] * len(groundtruth)
+        ig_arrays: list[npt.NDArray | None] = [None] * len(groundtruth)
         if ignore_regions is not None:
             for i, ig in enumerate(ignore_regions):
                 if isinstance(ig, Mask):
                     ig_arrays[i] = _render_mask(ig, H, W)
 
-        all_overlaps: List[float] = []
+        all_overlaps: list[float] = []
 
         for trajectory in trajectories:
+            # ``ReferralExperiment.gather`` may yield ``None`` placeholders for
+            # prompts whose trajectories were never written (e.g. ``pad=True``);
+            # skip them so the rest of the loop works on a concrete ``Trajectory``.
+            if trajectory is None:
+                continue
             pred_regions = trajectory.regions()
             for i in range(len(groundtruth)):
                 if not annotated[i]:
                     continue
                 gm = gt_arrays[i]
+                assert gm is not None
                 pred_region = pred_regions[i] if i < len(pred_regions) else None
                 pm = _render_mask(pred_region, H, W)
                 if pm is None:
@@ -170,21 +178,21 @@ class ReferralAverageAccuracy(SequenceAggregator):
     weighted = Boolean(default=True,
         description="Weight by sequence length (proportional to number of evaluated frames).")
 
-    def compatible(self, experiment: Experiment):
+    def compatible(self, experiment: Experiment) -> bool:
         return isinstance(experiment, ReferralExperiment)
 
     @property
-    def _title_default(self):
+    def _title_default(self) -> str:
         return "Referral accuracy"
 
-    def dependencies(self):
-        return self.analysis,
+    def dependencies(self) -> TSequence[Analysis]:
+        return (self.analysis,)
 
-    def describe(self):
+    def describe(self) -> tuple[Result | None, ...]:
         return Measure(self.title, "", 0, 1, Sorting.DESCENDING),
 
-    def aggregate(self, _: Tracker, sequences: List[Sequence],
-                  results: Grid):
+    def aggregate(self, tracker: Tracker, sequences: list[Sequence],
+                  results: Grid) -> tuple[Any, ...]:
         accuracy = 0.0
         weight = 0.0
 

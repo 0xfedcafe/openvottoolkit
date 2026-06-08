@@ -1,61 +1,25 @@
-from typing import Tuple
+from collections.abc import Callable
+from typing import Any
 
 import importlib
+import logging
 import multiprocessing
+import os
 import queue
+import sys
 import traceback
 import inspect
 import time
 
 from vot.dataset import Frame
-from vot.region import Region, Mask, Rectangle, Point, Polygon
 from vot.tracker import Tracker, OnlineTrackerRuntime, FrameObjects, ObjectStatus, TrackerException, FrameResult
+from vot.tracker.helpers import encode_region, decode_region, convert_region
 from vot.utilities import to_number
 
-def _encode_region(region: Region):
-    if isinstance(region, Mask):
-        return region.rasterize()
-    if isinstance(region, Rectangle):
-        return (region.x, region.y, region.width, region.height)
-    if isinstance(region, Point):
-        return (region.x, region.y)
-    if isinstance(region, Polygon):
-        return [(float(x), float(y)) for x, y in region.points()]
-
-    raise ValueError("Unknown region type: {}".format(type(region)))
-
-def _decode_region(data):
-    
-    if isinstance(data, list) and all(isinstance(point, tuple) and len(point) == 2 for point in data):
-        return Polygon([Point(x=point[0], y=point[1]) for point in data])
-    if isinstance(data, tuple) and len(data) == 4:
-        return Rectangle(x=data[0], y=data[1], width=data[2], height=data[3])
-    if isinstance(data, tuple) and len(data) == 2:
-        return Point(x=data[0], y=data[1])
-    if isinstance(data, list) and all(isinstance(row, list) for row in data):
-        return Mask(data)
-
-    raise ValueError("Unable to decode region from data: {}".format(data))
-
-def _convert_region(region: Region, target: str):
-    if target is None:
-        return region
-
-    target = target.lower()
-
-    if target == "mask":
-        return Mask.convert(region)
-    if target == "rectangle":
-        return Rectangle.convert(region)
-    if target == "point":
-        return Point.convert(region)
-    if target == "polygon":
-        return Polygon.convert(region)
-
-    raise ValueError("Unknown target region type: {}".format(target))
+logger = logging.getLogger("vot")
 
 
-def _resolve_factory(command: str):
+def _resolve_factory(command: str) -> Any:
     if ":" in command:
         module_name, object_name = command.split(":", 1)
     elif "." in command:
@@ -78,7 +42,8 @@ def _resolve_factory(command: str):
     return getattr(module, object_name)
 
 
-def _call_tracker_method(method, frame, new, properties):
+def _call_tracker_method(method: Callable[..., Any], frame: Any, new: Any,
+                         properties: dict[str, Any] | None) -> Any:
     signature = inspect.signature(method)
     arity = len(signature.parameters)
 
@@ -91,8 +56,22 @@ def _call_tracker_method(method, frame, new, properties):
     return method()
 
 
-def _worker_main(command, task_queue, result_queue, arguments, initialize_method, update_method):
+def _worker_main(command: str, task_queue: Any, result_queue: Any,
+                 arguments: dict[str, Any] | None, initialize_method: str, update_method: str,
+                 paths: list[str] | None = None, envvars: dict[str, str] | None = None) -> None:
     try:
+        # Self-cleanup: if the parent dies (Ctrl+C, killed terminal, SIGKILL), exit
+        # instead of running the tracker indefinitely on an orphaned pipe.
+        from vot.utilities import arm_parent_watchdog
+        arm_parent_watchdog()
+        # The worker runs in a spawned process, which does not inherit ``sys.path``
+        # edits or environment changes from the parent. Apply the tracker source
+        # paths and configured environment variables before importing the tracker.
+        for path in paths or []:
+            if path and path not in sys.path:
+                sys.path.insert(0, path)
+        if envvars:
+            os.environ.update({str(k): str(v) for k, v in envvars.items()})
         factory = _resolve_factory(command)
         tracker = factory(**(arguments or {})) if callable(factory) else factory
 
@@ -159,7 +138,7 @@ def _worker_main(command, task_queue, result_queue, arguments, initialize_method
                     status = (output, {})
             result_queue.put({"ok": True, "event": task_type, "status": status, "time": elapsed})
 
-    except (RuntimeError, TypeError, ValueError, ImportError, AttributeError) as e:
+    except Exception as e:
         result_queue.put({
             "ok": False,
             "error": str(e),
@@ -174,7 +153,9 @@ class PythonRuntime(OnlineTrackerRuntime):
     for example: ``mypackage.mytracker:Tracker``.
     """
 
-    def __init__(self, tracker: Tracker, command: str, log: bool = False, timeout: int = 30, linkpaths=None, envvars=None, arguments=None, **kwargs):
+    def __init__(self, tracker: Tracker, command: str, log: bool = False, timeout: int = 30,
+                 linkpaths: list[str] | str | None = None, envvars: dict[str, str] | None = None,
+                 arguments: dict[str, Any] | None = None, **kwargs: Any) -> None:
         super().__init__(tracker)
 
         self._command = command
@@ -186,16 +167,34 @@ class PythonRuntime(OnlineTrackerRuntime):
         self._initialize_method = kwargs.get("initialize_method", "init")
         self._update_method = kwargs.get("update_method", "update")
         self._convert = kwargs.get("convert", None)
+        # ``paths`` from the tracker config (registry key ``paths``). The worker is a
+        # spawned process and does not inherit the parent's ``sys.path``, so these
+        # tracker source directories must be forwarded to it explicitly.
+        self._paths = kwargs.get("paths", linkpaths)
 
-        self._task_queue = None
-        self._result_queue = None
-        self._process = None
+        # Surface configuration keys this runtime does not understand instead of
+        # silently dropping them (a misspelled option would otherwise just vanish).
+        _recognized = {"initialize_method", "update_method", "convert", "paths", "multiobject"}
+        unknown = sorted(set(kwargs) - _recognized)
+        if unknown:
+            logger.warning(
+                "PythonRuntime for tracker '%s' ignoring unrecognized option(s): %s",
+                tracker.identifier, ", ".join(unknown)
+            )
+
+        # ``multiprocessing.Queue``/``multiprocessing.Process`` annotations in
+        # the stdlib stubs are version-dependent; the simplest portable choice is
+        # ``Any | None`` here — the runtime types are still ``mp.Queue`` etc.
+        self._task_queue: Any | None = None
+        self._result_queue: Any | None = None
+        self._process: Any | None = None
         self._multiobject = kwargs.get("multiobject", True)
 
-    def _timeout_value(self):
+    def _timeout_value(self) -> float | None:
         return None if self._timeout is None or self._timeout <= 0 else self._timeout
 
-    def _wait_message(self):
+    def _wait_message(self) -> dict:
+        assert self._result_queue is not None, "Worker queues not initialized; call _ensure_started() first"
         try:
             return self._result_queue.get(timeout=self._timeout_value())
         except queue.Empty as e:
@@ -204,7 +203,7 @@ class PythonRuntime(OnlineTrackerRuntime):
                 tracker=self.tracker
             ) from e
 
-    def _raise_worker_error(self, message):
+    def _raise_worker_error(self, message: dict) -> None:
         details = message.get("traceback")
         error = message.get("error", "Unknown worker error")
         raise TrackerException(
@@ -213,7 +212,14 @@ class PythonRuntime(OnlineTrackerRuntime):
             tracker_log=details
         )
 
-    def _ensure_started(self):
+    def _resolved_paths(self) -> list[str]:
+        """Tracker source paths as absolute paths for the worker's ``sys.path``."""
+        if not self._paths:
+            return []
+        raw = self._paths.split(os.pathsep) if isinstance(self._paths, str) else list(self._paths)
+        return [os.path.abspath(p) for p in raw if p]
+
+    def _ensure_started(self) -> None:
         if self._process is not None and self._process.is_alive():
             return
 
@@ -228,7 +234,9 @@ class PythonRuntime(OnlineTrackerRuntime):
                 self._result_queue,
                 self._arguments,
                 self._initialize_method,
-                self._update_method
+                self._update_method,
+                self._resolved_paths(),
+                self._envvars,
             )
         )
         self._process.start()
@@ -244,29 +252,30 @@ class PythonRuntime(OnlineTrackerRuntime):
 
         self._multiobject = bool(message.get("multiobject", True))
 
-    def _send_task(self, task_type, frame: Frame, new=None, properties=None) -> Tuple[FrameObjects, float]:
+    def _send_task(self, task_type: str, frame: Frame, new: FrameObjects | None = None, properties: dict | None = None) -> tuple[FrameObjects, float]:
         if new is None:
             converted_new = []
         else:
             try:
                 if not isinstance(new, (list)):
-                    converted_new = (_encode_region(_convert_region(new.region, self._convert)), new.properties)
+                    converted_new = (encode_region(convert_region(new.region, self._convert)), new.properties)
                 else:
-                    converted_new = [(_encode_region(_convert_region(status.region, self._convert)), status.properties) for status in new]
+                    converted_new = [(encode_region(convert_region(status.region, self._convert)), status.properties) for status in new]
             except ValueError as e:
                 raise TrackerException(str(e), tracker=self.tracker) from e
         if len(frame.channels()) > 1:
-            frame = {channel: frame.channel(channel) for channel in frame.channels()}
+            frame_payload = {channel: frame.filename(channel) for channel in frame.channels()}
         else:
-            frame = frame.filename()
- 
+            frame_payload = frame.filename()
+
         payload = {
             "type": task_type,
-            "frame": frame,
+            "frame": frame_payload,
             "new": converted_new,
             "properties": {} if properties is None else properties
         }
 
+        assert self._task_queue is not None, "Worker queues not initialized; _ensure_started() must run first"
         self._task_queue.put(payload)
         message = self._wait_message()
 
@@ -281,19 +290,35 @@ class PythonRuntime(OnlineTrackerRuntime):
                 tracker=self.tracker
             )
         if not self._multiobject:
-            return FrameResult(ObjectStatus(_decode_region(message.get("status", (None, {}))[0]), message.get("status", (None, {}))[1]), float(message.get("time", 0.0)))
-        
-        return FrameResult([ObjectStatus(_decode_region(status[0]), status[1]) for status in message.get("status", [])], float(message.get("time", 0.0)))
+            return FrameResult(ObjectStatus(decode_region(message.get("status", (None, {}))[0]), message.get("status", (None, {}))[1]), float(message.get("time", 0.0)))
 
-    def initialize(self, frame: Frame, new: FrameObjects = None, properties: dict = None) -> Tuple[FrameObjects, float]:
+        return FrameResult([ObjectStatus(decode_region(status[0]), status[1]) for status in message.get("status", [])], float(message.get("time", 0.0)))
+
+    @staticmethod
+    def _mirror_output_shape(input_is_list: bool, status: FrameObjects) -> FrameObjects:
+        """Match the result shape to the input: a query-based caller passes a list and
+        indexes the result per query, while a legacy per-frame caller passes a single
+        ObjectStatus and expects one back. ``_send_task`` returns a bare ObjectStatus for
+        single-object trackers, so wrap/unwrap to mirror the input."""
+        if input_is_list and not isinstance(status, list):
+            return [status]
+        if not input_is_list and isinstance(status, list):
+            return status[0]
+        return status
+
+    def initialize(self, frame: Frame, new: FrameObjects | None = None, properties: dict | None = None) -> tuple[FrameObjects, float]:
         self._ensure_started()
+        # ``new`` is either a single ObjectStatus (legacy per-frame caller) or a
+        # list[ObjectStatus] (query-based caller). Return shape mirrors input shape so
+        # both call styles work without a dedicated wrapper.
+        input_is_list = isinstance(new, list)
         if not self.multiobject:
             if new is None:
                 raise TrackerException(
                     "Initialization frame must be provided for single-object tracker",
                     tracker=self.tracker
                 )
-            if isinstance(new, list):
+            if input_is_list:
                 if len(new) == 0:
                     raise TrackerException(
                         "Initialization frame must contain exactly one object for single-object tracker, but got an empty list",
@@ -305,24 +330,29 @@ class PythonRuntime(OnlineTrackerRuntime):
                         tracker=self.tracker
                     )
                 new = new[0]
-  
-        return self._send_task("initialize", frame, new, properties)
 
-    def update(self, frame: Frame, new: FrameObjects = None, properties: dict = None) -> Tuple[FrameObjects, float]:
+        status, elapsed = self._send_task("initialize", frame, new, properties)
+        return self._mirror_output_shape(input_is_list, status), elapsed
+
+    def update(self, frame: Frame, new: FrameObjects | None = None, properties: dict | None = None) -> tuple[FrameObjects, float]:
         self._ensure_started()
-        if not self.multiobject and new is not None and len(new) > 0:
-            raise TrackerException(
-                "Tracker does not support multiple objects, but multiple objects were provided for update",
-                tracker=self.tracker
-            )
+        input_is_list = isinstance(new, list)
+        if not self.multiobject and input_is_list:
+            if len(new) > 1:
+                raise TrackerException(
+                    "Tracker does not support multiple objects, but multiple objects were provided for update",
+                    tracker=self.tracker,
+                )
+            new = new[0] if len(new) == 1 else None
 
-        return self._send_task("update", frame, new, properties)
+        status, elapsed = self._send_task("update", frame, new, properties)
+        return self._mirror_output_shape(input_is_list, status), elapsed
 
-    def restart(self):
+    def restart(self) -> None:
         self.stop()
         self._ensure_started()
 
-    def stop(self):
+    def stop(self) -> None:
         if self._process is None:
             return
 
@@ -350,9 +380,10 @@ class PythonRuntime(OnlineTrackerRuntime):
         self._process = None
 
     @property
-    def multiobject(self):
+    def multiobject(self) -> bool:
+        self._ensure_started()
         return self._multiobject
-    
+
 from vot.tracker import register_runtime_protocol
 
 register_runtime_protocol("python", PythonRuntime)

@@ -1,10 +1,13 @@
 """Utilities for reading and writing regions from and to files."""
 
+from __future__ import annotations
+
 import math
-from typing import List, Union, TextIO
+from typing import Any, IO
 import io
 
 import numpy as np
+import numpy.typing as npt
 import numba
 
 @numba.njit(cache=True)
@@ -13,12 +16,12 @@ def mask_to_rle(m, maxstride=100000000):
     is compiled just-in-time for faster execution.
 
     :param m: 2-D binary mask
-    :type m: np.ndarray
+    :type m: npt.NDArray
     :param maxstride: Maximum number of consecutive 0s or 1s in the RLE encoding. If the number of consecutive 0s or 1s is larger than maxstride, it is split into multiple elements.
     :type maxstride: int
 
     :returns: RLE encoding of the mask
-    :rtype: List[int]"""
+    :rtype: list[int]"""
     # reshape mask to vector
     v = m.reshape((m.shape[0] * m.shape[1]))
 
@@ -70,14 +73,14 @@ def rle_to_mask(rle, width, height):
     is compiled just-in-time for faster execution.
 
     :param rle: RLE encoding of the mask
-    :type rle: List[int]
+    :type rle: list[int]
     :param width: Width of the mask
     :type width: int
     :param height: Height of the mask
     :type height: int
 
     :returns: 2-D binary mask
-    :rtype: np.ndarray"""
+    :rtype: npt.NDArray"""
 
     # allocate list of zeros
     v = np.zeros(width * height, dtype=np.uint8)
@@ -112,130 +115,149 @@ def create_mask_from_string(mask_encoding):
 
     return mask, (tl_x, tl_y)
 
+from vot.region import Region
 from vot.region.raster import mask_bounds
 
-def encode_mask(mask):
+def encode_mask(mask: npt.NDArray) -> tuple[tuple[int, int, int, int], list[int]]:
     """ Encode a binary mask to a string in the following format: x0, y0, w, h, RLE.
 
     :param mask: 2-D binary mask
-    :type mask: np.ndarray
 
-    :returns: Encoded mask
-    :rtype: str"""
+    :returns: ``((tl_x, tl_y, region_w, region_h), rle)`` describing the minimal
+        bounding box of the foreground and its RLE encoding."""
+    # handle the case when the mask is empty: ``mask_bounds`` returns (0, 0, 0, 0)
+    # for an all-zero mask (it never returns None), which is indistinguishable from a
+    # single foreground pixel at the origin, so test the pixels directly.
+    if not mask.any():
+        return (0, 0, 0, 0), [0]
+
     # calculate coordinates of the top-left corner and region width and height (minimal region containing all 1s)
     x_min, y_min, x_max, y_max = mask_bounds(mask)
 
-    # handle the case when the mask empty
-    if x_min is None:
-        return (0, 0, 0, 0), [0]
-    else:
-        tl_x = x_min
-        tl_y = y_min
-        region_w = x_max - x_min + 1
-        region_h = y_max - y_min + 1
+    tl_x = x_min
+    tl_y = y_min
+    region_w = x_max - x_min + 1
+    region_h = y_max - y_min + 1
 
-        # extract target region from the full mask and calculate RLE
-        # do not use full mask to optimize speed and space
-        target_mask = mask[tl_y:tl_y+region_h, tl_x:tl_x+region_w]
-        rle = mask_to_rle(np.array(target_mask))
+    # extract target region from the full mask and calculate RLE
+    # do not use full mask to optimize speed and space
+    target_mask = mask[tl_y:tl_y + region_h, tl_x:tl_x + region_w]
+    rle = mask_to_rle(np.array(target_mask))
 
-        return (tl_x, tl_y, region_w, region_h), rle
+    return (tl_x, tl_y, region_w, region_h), rle
+
 
 def parse_region(string: str, separator: str = ",") -> "Region":
     """Parse input string to the appropriate region format and return Region object.
 
     :param string: comma separated list of values
-    :type string: str
     :param separator: separator of values in the input string
-    :type separator: str
 
-    :returns: resulting region
-    :rtype: Region"""
+    :returns: parsed region
+    :raises RegionException: if ``string`` does not match any known region format
+    """
     from vot import config
-    from vot.region import Special, Point
+    from vot.region import Special, SpecialCode, Point, RegionException
     from vot.region.shapes import Rectangle, Polygon, Mask
+
+    if not string:
+        raise RegionException("Cannot parse region from an empty string")
 
     if string[0] == 'm':
         # input is a mask - decode it
         m_, offset_ = create_mask_from_string(string[1:].split(separator))
         return Mask(m_, offset=offset_, optimize=config.mask_optimize_read)
-    else:
-        # input is not a mask - check if special, rectangle or polygon
-        tokens = [float(t) for t in string.split(separator)]
-        if len(tokens) == 1:
-            return Special(tokens[0])
-        if len(tokens) == 2:
-            if any([math.isnan(el) for el in tokens]):
-                return Special(0)
-            else:
-                return Point(tokens[0], tokens[1])
-        if len(tokens) == 4:
-            if any([math.isnan(el) for el in tokens]):
-                return Special(0)
-            else:
-                return Rectangle(tokens[0], tokens[1], tokens[2], tokens[3])
-        elif len(tokens) % 2 == 0 and len(tokens) > 4:
-            if any([math.isnan(el) for el in tokens]):
-                return Special(0)
-            else:
-                return Polygon([(x_, y_) for x_, y_ in zip(tokens[::2], tokens[1::2])])
-    return None
 
-def read_trajectory_binary(fp: io.RawIOBase):
+    # input is not a mask - check if special, rectangle or polygon
+    tokens = [float(t) for t in string.split(separator)]
+
+    # A region line filled entirely with non-finite values (NaN/Inf) is the
+    # trajectory-format sentinel for "object absent in this frame". A line that
+    # is only partially non-finite is corrupt -- not a sanctioned encoding --
+    # so fail loudly rather than silently guess a region.
+    nonfinite = [not math.isfinite(t) for t in tokens]
+    if all(nonfinite):
+        return Special(SpecialCode.UNKNOWN)
+    if any(nonfinite):
+        raise RegionException(
+            "Region line mixes finite and non-finite values: {!r}".format(string)
+        )
+
+    if len(tokens) == 1:
+        return Special(int(tokens[0]))
+    if len(tokens) == 2:
+        return Point(tokens[0], tokens[1])
+    if len(tokens) == 4:
+        return Rectangle(tokens[0], tokens[1], tokens[2], tokens[3])
+    if len(tokens) % 2 == 0 and len(tokens) > 4:
+        return Polygon([(x_, y_) for x_, y_ in zip(tokens[::2], tokens[1::2])])
+
+    # ``parse_region`` is declared to return a ``Region`` — any unparseable input is
+    # a caller error and must raise rather than silently return ``None``.
+    raise RegionException(
+        "Cannot parse region from {} token(s): {!r}".format(len(tokens), string)
+    )
+
+def read_trajectory_binary(fp: IO[bytes]) -> list["Region"]:
     """Reads a trajectory from a binary file and returns a list of regions.
 
-    :param fp: File pointer to the binary file
-    :type fp: io.RawIOBase
+    :param fp: Binary file handle. Any object that exposes ``.read()`` returning
+        bytes works — ``io.RawIOBase``, ``io.BufferedIOBase``, and ``io.BytesIO``
+        are all accepted.
 
-    :returns: List of regions
-    :rtype: list"""
+    :returns: List of regions"""
     import struct
     from cachetools import LRUCache, cached
     from vot.region import Special, Point
     from vot.region.shapes import Rectangle, Polygon, Mask
 
-    buffer = dict(data=fp.read(), offset = 0)
+    data_bytes: bytes = fp.read()
+    cursor: int = 0
 
     @cached(cache=LRUCache(maxsize=32))
-    def calcsize(format):
+    def calcsize(format: str) -> int:
         """Calculate size of the struct format."""
         return struct.calcsize(format)
 
-    def read(format: str):
+    def read(format: str) -> tuple[Any, ...]:
         """Read struct from the buffer and update offset."""
-        unpacked = struct.unpack_from(format, buffer["data"], buffer["offset"])
-        buffer["offset"] += calcsize(format)
+        nonlocal cursor
+        unpacked = struct.unpack_from(format, data_bytes, cursor)
+        cursor += calcsize(format)
         return unpacked
 
     _, length = read("<hI")
 
-    trajectory = []
+    trajectory: list["Region"] = []
 
     for _ in range(length):
-        type, = read("<B")
-        if type == 0: r = Special(*read("<I"))
-        elif type == 1: r = Rectangle(*read("<ffff"))
-        elif type == 2:
+        type_code, = read("<B")
+        r: "Region"
+        if type_code == 0:
+            r = Special(*read("<I"))
+        elif type_code == 1:
+            r = Rectangle(*read("<ffff"))
+        elif type_code == 2:
             n, = read("<H")
             values = read("<%df" % (2 * n))
             r = Polygon(list(zip(values[0::2], values[1::2])))
-        elif type == 3:
+        elif type_code == 3:
             tl_x, tl_y, region_w, region_h, n = read("<hhHHH")
-            rle = np.array(read("<%dH" % (n)), dtype=np.int32)
+            rle = np.array(read("<%dH" % n), dtype=np.int32)
             r = Mask(rle_to_mask(rle, region_w, region_h), (tl_x, tl_y))
-        elif type == 4: r = Point(*read("<ff"))
+        elif type_code == 4:
+            r = Point(*read("<ff"))
         else:
             raise IOError("Wrong region type")
         trajectory.append(r)
     return trajectory
 
-def write_trajectory_binary(fp: io.RawIOBase, data: List["Region"]):
+
+def write_trajectory_binary(fp: IO[bytes], data: list["Region"]) -> None:
     """Writes a trajectory to a binary file.
 
-    :param fp: File pointer to the binary file
-    :type fp: io.RawIOBase
+    :param fp: Binary file handle accepting ``bytes`` writes.
     :param data: List of regions
-    :type data: list
     """
     import struct
     from vot.region import Special, Point
@@ -244,79 +266,110 @@ def write_trajectory_binary(fp: io.RawIOBase, data: List["Region"]):
     fp.write(struct.pack("<hI", 1, len(data)))
 
     for r in data:
-        if isinstance(r, Special): fp.write(struct.pack("<BI", 0, r.code))
-        elif isinstance(r, Point): fp.write(struct.pack("<Bff", 4, r.x, r.y))
-        elif isinstance(r, Rectangle): fp.write(struct.pack("<Bffff", 1, r.x, r.y, r.width, r.height))
-        elif isinstance(r, Polygon): fp.write(struct.pack("<BH%df" % (2 * r.size), 2, r.size, *[item for sublist in r.points() for item in sublist]))
-        elif isinstance(r, Mask): 
-            rle = mask_to_rle(r.mask, maxstride=255*255)
+        if isinstance(r, Special):
+            fp.write(struct.pack("<BI", 0, r.code))
+        elif isinstance(r, Point):
+            fp.write(struct.pack("<Bff", 4, r.x, r.y))
+        elif isinstance(r, Rectangle):
+            fp.write(struct.pack("<Bffff", 1, r.x, r.y, r.width, r.height))
+        elif isinstance(r, Polygon):
+            fp.write(struct.pack("<BH%df" % (2 * r.size), 2, r.size, *[item for sublist in r.points() for item in sublist]))
+        elif isinstance(r, Mask):
+            rle = mask_to_rle(r.mask, maxstride=255 * 255)
             fp.write(struct.pack("<BhhHHH%dH" % len(rle), 3, r.offset[0], r.offset[1], r.mask.shape[1], r.mask.shape[0], len(rle), *rle))
         else:
-            raise IOError(f"Wrong region type {type(r)}")
+            raise IOError(f"Wrong region type {type(r).__name__}")
 
-def read_trajectory(fp: Union[str, TextIO], separator: str = ","):
+
+def _looks_binary(fp: Any) -> bool:
+    """Best-effort detection of whether an opened file handle yields bytes.
+
+    Returns ``True`` for raw/buffered binary streams (and ``io.BytesIO``), ``False``
+    for text streams. Used by :func:`read_trajectory` and :func:`write_trajectory`
+    to decide which branch to take when the caller passes an already-open handle.
+    """
+    if isinstance(fp, (io.RawIOBase, io.BufferedIOBase, io.BytesIO)):
+        return True
+    if isinstance(fp, io.TextIOBase):
+        return False
+    # Some handles (e.g. ``gzip.GzipFile``) don't inherit from ``io`` base classes;
+    # fall back to inspecting the ``mode`` attribute when present.
+    mode = getattr(fp, "mode", "")
+    return "b" in mode if isinstance(mode, str) else False
+
+
+def read_trajectory(fp: str | IO[Any], separator: str = ",") -> list["Region"]:
     """Reads a trajectory from a file and returns a list of regions.
 
-    :param fp: File path or file pointer to the trajectory file
-    :type fp: str or TextIO
-    :param separator: Separator of values in the region, only used for text files
-    :type separator: str
+    :param fp: File path or already-open file handle (text or binary).
+    :param separator: Separator of values in the region, only used for text files.
 
-    :returns: List of regions
-    :rtype: list"""
+    :returns: List of regions"""
+    binary: bool
+    handle: IO[Any]
+    close: bool
     if isinstance(fp, str):
         try:
             import struct
-            with open(fp, "r+b") as tfp:
+            # Read-only ('rb'): the file is only peeked at to sniff the binary header,
+            # so opening it read-write ('r+b') would needlessly fail on read-only files
+            # and silently mis-parse a binary trajectory as text.
+            with open(fp, "rb") as tfp:
                 v, = struct.unpack("<h", tfp.read(struct.calcsize("<h")))
                 binary = v == 1
-                # TODO: we can use the same file handle in case of binary format
-        except Exception as _:
+        except Exception:
             binary = False
-
-        fp = open(fp, "rb" if binary else "r")
+        handle = open(fp, "rb" if binary else "r")
         close = True
     else:
-        binary = isinstance(fp, (io.RawIOBase, io.BufferedIOBase)) 
+        handle = fp
+        binary = _looks_binary(handle)
         close = False
 
+    regions: list["Region"]
     if binary:
-        regions = read_trajectory_binary(fp)
+        regions = read_trajectory_binary(handle)
     else:
-        regions = []
-        for line in fp.readlines():
-            regions.append(parse_region(line.strip(), separator))
+        regions = [parse_region(line.strip(), separator) for line in handle.readlines()]
 
     if close:
-        fp.close()
+        handle.close()
 
     return regions
 
-def write_trajectory(fp: Union[str, TextIO], data: List["Region"]):
+
+def write_trajectory(fp: str | IO[Any], data: list["Region"]) -> None:
     """Write a trajectory to a file handle or a file with a given name. Based on the
     suffix of a file or properties of a file handle, the output may be either text based
     or binary.
 
     :param fp: File handle or file name
-    :type fp: Union[str, TextIO]
     :param data: Trajectory, a list of region objects
-    :type data: List[Region]
 
-    :raises IOError: If the file format is not supported"""
+    :raises IOError: If the file format is not supported, or the trajectory
+        contains an element that is not a region"""
 
+    for region in data:
+        if not isinstance(region, Region):
+            raise IOError("Trajectory contains a non-region element: {!r}".format(region))
+
+    binary: bool
+    handle: IO[Any]
+    close: bool
     if isinstance(fp, str):
         binary = fp.endswith(".bin")
+        handle = open(fp, "wb" if binary else "w")
         close = True
-        fp = open(fp, "wb" if binary else "w")
     else:
-        binary = isinstance(fp, (io.RawIOBase, io.BufferedIOBase)) 
+        handle = fp
+        binary = _looks_binary(handle)
         close = False
 
     if binary:
-        write_trajectory_binary(fp, data)
+        write_trajectory_binary(handle, data)
     else:
         for region in data:
-            fp.write(str(region) + "\n")
-    
+            handle.write(str(region) + "\n")
+
     if close:
-        fp.close()
+        handle.close()

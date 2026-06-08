@@ -8,6 +8,7 @@ import os
 import sys
 import argparse
 import logging
+from typing import Any
 import yaml
 from datetime import datetime
 
@@ -19,26 +20,26 @@ logger = get_logger()
 class EnvDefault(argparse.Action):
     """Argparse action that resorts to a value in a specified envvar if no value is
     provided via program arguments."""
-    def __init__(self, envvar, required=True, default=None, separator=None, **kwargs):
+    def __init__(self, envvar: str, required: bool = True, default: Any | None = None, separator: str | None = None, **kwargs: Any) -> None:
         """Initialize the action."""
-        if not default and envvar:
-            if envvar in os.environ:
-                default = os.environ[envvar]
-        if separator:
+        # previously if default is 0, false, empty string it would be considered as not provided
+        if default is None and envvar and envvar in os.environ:
+            default = os.environ[envvar]
+        if separator and isinstance(default, str):
             default = default.split(separator)
-        if required and default:
+        if required and default is not None:
             required = False
         self.separator = separator
         super(EnvDefault, self).__init__(default=default, required=required,
                                          **kwargs)
 
-    def __call__(self, parser, namespace, values, option_string=None):
+    def __call__(self, parser: argparse.ArgumentParser, namespace: argparse.Namespace, values: Any, option_string: str | None = None) -> None:
         """Call the action."""
-        if self.separator:
+        if self.separator and isinstance(values, str):
             values = values.split(self.separator)
         setattr(namespace, self.dest, values)
 
-def do_test(config: argparse.Namespace):
+def do_test(config: argparse.Namespace) -> None:
     """Run a test for a tracker.
 
     :param config: Configuration
@@ -46,7 +47,7 @@ def do_test(config: argparse.Namespace):
     """
 
     from vot.tracker import Registry
-    from vot.tracker.tests import test_tracker_runtime
+    from vot.tracker.tests import run_tracker_test
     from vot import config as global_config
 
     trackers = Registry(global_config.registry)
@@ -66,10 +67,10 @@ def do_test(config: argparse.Namespace):
 
     runtime = tracker.runtime(log=True)
 
-    test_tracker_runtime(runtime, config.visualize, config.sequence, config.ignore)
+    run_tracker_test(runtime, config.visualize, config.sequence, config.ignore)
 
 
-def do_initialize(config: argparse.Namespace):
+def do_initialize(config: argparse.Namespace) -> None:
     """Initialize a workspace. If a stack is provided, the workspace is initialized with
     the stack. If no stack is provided, but a dataset exists, then a dummy config can be
     created for this custom dataset. If neither is provided, the user is prompted to
@@ -96,18 +97,19 @@ def do_initialize(config: argparse.Namespace):
             # Attempt to load a dataset from the sequences directory
             from vot.dataset import load_dataset
             logger.info("Found sequences directory, attempting to load dataset")
+            dataset = None
             try:
                 dataset = load_dataset(sequences_directory)
                 logger.info("Loaded dataset: %s", dataset)
-
-            except Exception as e:
+            except Exception:
                 pass
             if dataset is not None:
-                logger.info("Loaded dataset: %s", dataset)
                 default_config = dict(dataset=dataset)
                 Workspace.initialize(config.workspace, default_config, download=False)
                 logger.info("Initialized workspace in '%s'", config.workspace)
-                return
+            else:
+                logger.error("Unable to load dataset from sequences directory")
+            return
 
         else:
             stacks = list_integrated_stacks()
@@ -118,10 +120,11 @@ def do_initialize(config: argparse.Namespace):
 
             return
 
+    assert config.stack is not None
     stack_file = resolve_stack(config.stack)
 
     if stack_file is None:
-        logger.error("Experiment stack %s not found", stack_file)
+        logger.error("Experiment stack %s not found", config.stack)
         return
 
     default_config = dict(stack=config.stack, registry=["./trackers.ini"])
@@ -132,8 +135,11 @@ def do_initialize(config: argparse.Namespace):
     except WorkspaceException as we:
         logger.error("Error during workspace initialization: %s", we)
 
-def do_evaluate(config: argparse.Namespace):
+def do_evaluate(config: argparse.Namespace) -> None:
     """Run an evaluation for a tracker on an experiment stack and a set of sequences.
+
+    Trackers are taken from ``config.trackers``; the literal reference ``all`` expands to every
+    tracker in the registry, and ``#tag`` references expand to all trackers carrying that tag.
 
     :param config: Configuration
     :type config: argparse.Namespace
@@ -147,7 +153,13 @@ def do_evaluate(config: argparse.Namespace):
 
     logger.debug("Loaded workspace in '%s'", config.workspace)
 
-    trackers = workspace.registry.resolve(*config.trackers, storage=workspace.storage.substorage("results"), skip_unknown=False)
+    # The literal "all" expands to every tracker registered in the registry.
+    references = config.trackers
+    if "all" in references:
+        references = workspace.registry.identifiers()
+        logger.info("Evaluating all %d trackers in the registry", len(references))
+
+    trackers = workspace.registry.resolve(*references, storage=workspace.storage.substorage("results"), skip_unknown=False)
 
     if len(trackers) == 0:
         logger.error("Unable to continue without at least on tracker")
@@ -166,11 +178,16 @@ def do_evaluate(config: argparse.Namespace):
         logger.error("No experiments found, stopping.")
         return
 
+    sequences = list(workspace.dataset)
+    if config.sequences:
+        selected = config.sequences.split(",")
+        sequences = [sequence for sequence in sequences if sequence.name in selected]
+
     try:
         for tracker in trackers:
             logger.debug("Evaluating tracker %s", tracker.identifier)
             for experiment in experiments:
-                run_experiment(experiment, tracker, workspace.dataset, config.force, config.persist)
+                run_experiment(experiment, tracker, experiment.select(sequences), config.force, config.persist)
 
         logger.info("Evaluation concluded successfuly")
 
@@ -179,7 +196,7 @@ def do_evaluate(config: argparse.Namespace):
     except TrackerException as te:
         logger.error("Evaluation interrupted by tracker error: {}".format(te))
 
-def do_analysis(args: argparse.Namespace):
+def do_analysis(args: argparse.Namespace) -> None:
     """Run an analysis for a tracker on an experiment stack and a set of sequences.
     Analysis results are serialized to disk either as a JSON file or as a YAML file.
 
@@ -220,7 +237,8 @@ def do_analysis(args: argparse.Namespace):
 
     else:
         from concurrent.futures import ProcessPoolExecutor
-        executor = ProcessPoolExecutor(config.worker_pool_size)
+        from vot.utilities import arm_parent_watchdog
+        executor = ProcessPoolExecutor(config.worker_pool_size, initializer=arm_parent_watchdog)
 
     if not config.persistent_cache:
         from cachetools import LRUCache
@@ -244,7 +262,7 @@ def do_analysis(args: argparse.Namespace):
 
             storage = workspace.storage.substorage("analysis")
 
-            sequences = workspace.dataset if args.sequences is None else [s for s in workspace.dataset if s.name in args.sequences.split(",")]
+            sequences = list(workspace.dataset) if args.sequences is None else [s for s in workspace.dataset if s.name in args.sequences.split(",")]
 
             if args.format == "json":
                 generate_serialized(trackers, sequences, results, storage, "json", name)
@@ -259,7 +277,7 @@ def do_analysis(args: argparse.Namespace):
 
         executor.shutdown(wait=True)
 
-def do_report(config: argparse.Namespace):
+def do_report(config: argparse.Namespace) -> None:
     """Generate a report for a one or multiple trackers on an experiment stack and a set
     of sequences.
 
@@ -296,7 +314,7 @@ def do_report(config: argparse.Namespace):
     logger.info("Report generation successful, document available as %s", name)
     
     
-def do_pack(config: argparse.Namespace):
+def do_pack(config: argparse.Namespace) -> None:
     """Package results to a ZIP file so that they can be submitted to a challenge.
 
     :param config: Configuration
@@ -322,7 +340,7 @@ def do_pack(config: argparse.Namespace):
     with Progress("Scanning", len(workspace.dataset) * len(workspace.stack)) as progress:
 
         for experiment in workspace.stack:
-            sequences = experiment.transform(workspace.dataset)
+            sequences = experiment.transform(experiment.select(list(workspace.dataset)))
             for sequence in sequences:
                 complete, files, results = experiment.scan(tracker, sequence)
                 all_files.extend([(f, experiment.identifier, sequence.name, results) for f in files])
@@ -347,9 +365,12 @@ def do_pack(config: argparse.Namespace):
             timestamp="{:%Y-%m-%dT%H-%M-%S.%f%z}".format(timestamp), platform=sys.platform,
             python=sys.version, toolkit=toolkit_version(), stack=workspace.dump()["stack"])
 
+        zip_date_time = (timestamp.year, timestamp.month, timestamp.day,
+                         timestamp.hour, timestamp.minute, timestamp.second)
+
         with zipfile.ZipFile(workspace.storage.write(archive_name, binary=True), mode="w") as archive:
             for f in all_files:
-                info = zipfile.ZipInfo(filename=os.path.join(f[1], f[2], f[0]), date_time=timestamp.timetuple())
+                info = zipfile.ZipInfo(filename=os.path.join(f[1], f[2], f[0]), date_time=zip_date_time)
                 with archive.open(info, mode="w") as fout, f[3].read(f[0]) as fin:
                     if isinstance(fin, io.TextIOBase):
                         copyfileobj(fin, io.TextIOWrapper(fout))
@@ -357,19 +378,180 @@ def do_pack(config: argparse.Namespace):
                         copyfileobj(fin, fout)
                 progress.relative(1)
 
-            info = zipfile.ZipInfo(filename="manifest.yml", date_time=timestamp.timetuple())
+            info = zipfile.ZipInfo(filename="manifest.yml", date_time=zip_date_time)
             with io.TextIOWrapper(archive.open(info, mode="w")) as fout:
                 yaml.dump(manifest, fout, Dumper=YAMLEncoder)
 
     logger.info("Result packaging successful, archive available in %s", archive_name)
 
-def main():
+def print_sequence_list(sequences_dir: str, infos: list) -> None:
+    """Pretty-prints a sequence listing with channels, frame count and groundtruth status.
+
+    Frame counts not declared in the sequence metadata are shown inferred from disk, prefixed
+    with ``~`` and explained by a footnote.
+
+    Output is colourised only when writing to a terminal so piped output stays plain text.
+
+    :param sequences_dir: Directory the sequences were listed from (shown in the header).
+    :param infos: List of :class:`vot.dataset.preparation.SequenceInfo` entries.
+    """
+    import colorama
+
+    use_color = sys.stdout.isatty()
+
+    def paint(text: str, *styles: str) -> str:
+        """Wraps text in ANSI styles when writing to a terminal, otherwise returns it as-is."""
+        if not use_color:
+            return text
+        return "".join(styles) + text + colorama.Style.RESET_ALL
+
+    name_width = max(len(info.name) for info in infos)
+    channel_width = max(len(", ".join(info.channels)) if info.channels else 1 for info in infos)
+
+    print()
+    print(paint("Sequences in {} ({})".format(sequences_dir, len(infos)), colorama.Style.BRIGHT))
+    print()
+
+    any_inferred = any(info.length is None and info.inferred_length is not None for info in infos)
+
+    for info in infos:
+        name = paint(info.name.ljust(name_width), colorama.Style.BRIGHT, colorama.Fore.CYAN)
+        channels_text = ", ".join(info.channels) if info.channels else "-"
+        channels = paint(channels_text.ljust(channel_width), colorama.Fore.YELLOW)
+
+        if info.length is not None:
+            length = "{:>6} frames".format(info.length)
+        elif info.inferred_length is not None:
+            # Metadata declares no length; show the count inferred from disk, marked with '~'.
+            length = paint("~{:>5} frames".format(info.inferred_length), colorama.Style.DIM)
+        else:
+            length = paint("     ? frames", colorama.Style.DIM)
+
+        if not info.present:
+            status = paint("missing directory", colorama.Fore.RED)
+        elif info.has_groundtruth:
+            status = paint("groundtruth", colorama.Fore.GREEN)
+        else:
+            status = paint("no groundtruth", colorama.Fore.RED)
+
+        print("  {}   {}   {}   {}".format(name, channels, length, status))
+    print()
+
+    if any_inferred:
+        print(paint("  ~ frame count inferred from groundtruth.txt or channel images "
+                     "(not declared in sequence metadata)", colorama.Style.DIM))
+        print()
+
+
+def do_sequences(config: argparse.Namespace) -> None:
+    """Dispatcher for the ``vot sequences`` subcommand. Routes to one of the helpers in
+    :mod:`vot.dataset.preparation` based on ``config.sequences_action``.
+
+    :param config: Configuration
+    :type config: argparse.Namespace
+    """
+    from vot.dataset import preparation as seq_utils
+    from vot.dataset.layout import SequenceList
+
+    action = config.sequences_action
+    if action is None:
+        config.sequences_parser.print_help()
+        return
+
+    if action == "extract-frames":
+        seq_utils.extract_frames(config.video, config.output_dir, fps=config.fps,
+                                 start_frame=config.start_frame, quality=config.quality,
+                                 channel=config.channel)
+
+    elif action == "import-video":
+        # The sequences live in ``<workspace>/sequences`` (same convention as ``do_initialize``).
+        sequences_dir = os.path.join(config.workspace, "sequences")
+        seq_utils.import_video(config.video, sequences_dir, name=config.name,
+                               fps=config.fps, quality=config.quality, channel=config.channel)
+
+    elif action == "remove":
+        sequences_dir = os.path.join(config.workspace, "sequences")
+        if not config.force:
+            answer = input("Remove sequence '{}' from {}? [y/N] ".format(config.name, sequences_dir))
+            if answer.strip().lower() not in ("y", "yes"):
+                logger.info("Aborted")
+                return
+        seq_utils.remove_sequence(sequences_dir, config.name)
+
+    elif action == "list":
+        sequences_dir = os.path.join(config.workspace, "sequences")
+        infos = seq_utils.collect_sequence_info(sequences_dir)
+        if not infos:
+            logger.info("No sequences found in %s", sequences_dir)
+        else:
+            print_sequence_list(sequences_dir, infos)
+
+    elif action == "yolo-to-vot":
+        seq_utils.yolo_to_vot(config.source, config.destination, fps=config.fps)
+
+    elif action == "anchors":
+        for sequence_dir in config.sequences:
+            seq_utils.generate_anchors_for_sequence(sequence_dir, force=config.force)
+
+    elif action == "metadata":
+        for sequence_dir in config.sequences:
+            seq_utils.write_sequence_metadata(sequence_dir, fps=config.fps, width=config.width,
+                                              height=config.height, length=config.length, force=config.force)
+
+    elif action == "reverse":
+        seq_utils.reverse_sequence(config.source, config.destination)
+
+    elif action == "delayed-init":
+        seq_utils.delayed_init_variants(config.source, count=config.count, repetitions=config.repetitions,
+                                        output_base=config.output_base)
+
+    elif action == "slice":
+        # ``take_slice`` is a building block reused by speedup/size-slices/baseline with temp
+        # dirs, so it does not auto-register; register the user-facing destination here.
+        output_path = seq_utils.take_slice(config.source, config.begin_frame, config.end_frame, config.output_dir)
+        SequenceList(output_path.parent).append(output_path.name)
+
+    elif action == "subsample":
+        output_path = seq_utils.subsample_sequence(config.source, config.step, config.output_dir)
+        SequenceList(output_path.parent).append(output_path.name)
+
+    elif action == "size-slices":
+        size_ranges = []
+        for spec in config.size_ranges:
+            parts = spec.split(":")
+            if len(parts) != 3:
+                raise argparse.ArgumentTypeError("Invalid size range '{}'; expected min:max:label".format(spec))
+            size_ranges.append((float(parts[0]), float(parts[1]), parts[2]))
+        seq_utils.create_size_slices(config.source, size_ranges, config.output_dir,
+                                     target_frames=config.target_frames,
+                                     min_bbox_movements=config.min_bbox_movements,
+                                     prefer_no_speedup=not config.allow_speedup,
+                                     check_initial_size_only=config.initial_size_only)
+
+    elif action == "speedup":
+        seq_utils.create_speedup_experiments(config.source, config.output_dir,
+                                             speedup_factors=config.factors,
+                                             start_frame=config.start_frame,
+                                             end_frame=config.end_frame,
+                                             sequence_prefix=config.prefix)
+
+    elif action == "baseline":
+        seq_utils.create_baseline_slice(config.source, config.output_dir,
+                                        start_frame=config.start_frame, end_frame=config.end_frame,
+                                        concatenate_path=config.concatenate)
+
+    else:
+        logger.error("Unknown sequences subcommand: %s", action)
+
+
+def main() -> None:
     """Entrypoint to the toolkit Command Line Interface utility, should be executed as a
     program and provided with arguments."""
 
     parser = argparse.ArgumentParser(description='VOT Toolkit Command Line Interface', prog="vot")
-    parser.add_argument("--debug", "-d", default=False, help="Backup backend", required=False, action='store_true')
+    parser.add_argument("--debug", "-d", default=False, help="Enable debug mode and verbose logging", required=False, action='store_true')
     parser.add_argument("--registry", default=".", help='Tracker registry paths', required=False)
+    parser.add_argument("--version", "-V", action="version", version="%(prog)s " + toolkit_version())
 
     subparsers = parser.add_subparsers(help='commands', dest='action', title="Commands")
 
@@ -385,11 +567,12 @@ def main():
     workspace_parser.add_argument("stack", nargs="?", help='Experiment stack')
 
     evaluate_parser = subparsers.add_parser('evaluate', aliases=["run"], help='Evaluate one or more trackers in a given workspace')
-    evaluate_parser.add_argument("trackers", nargs='+', default=None, help='Tracker identifiers')
+    evaluate_parser.add_argument("trackers", nargs='+', default=None, help='Tracker identifiers, or "all" to evaluate every tracker in the registry')
     evaluate_parser.add_argument("--force", "-f", default=False, help="Force rerun of the entire evaluation", required=False, action='store_true')
     evaluate_parser.add_argument("--persist", "-p", default=False, help="Persist execution even in case of an error", required=False, action='store_true')
     evaluate_parser.add_argument("--workspace", default=os.getcwd(), help='Workspace path')
     evaluate_parser.add_argument("--experiments", default=None, help='Filter specified experiments (comma separated names)', required=False)
+    evaluate_parser.add_argument("--sequences", default=None, help='Filter specified sequences (comma separated names)', required=False)
 
     analysis_parser = subparsers.add_parser('analysis', aliases=["analyse", "analyze"], help='Run analysis of results')
     analysis_parser.add_argument("trackers", nargs='*', help='Tracker identifiers')
@@ -411,6 +594,98 @@ def main():
     pack_parser.add_argument("--workspace", default=os.getcwd(), help='Workspace path')
     pack_parser.add_argument("tracker", help='Tracker identifier')
 
+    sequences_parser = subparsers.add_parser('sequences', help='Dataset / sequence preparation utilities')
+    sequences_subparsers = sequences_parser.add_subparsers(dest='sequences_action', title='Sequences actions')
+    # Expose the parser on the namespace so do_sequences can print its usage when no action is given.
+    sequences_parser.set_defaults(sequences_parser=sequences_parser)
+
+    extract_parser = sequences_subparsers.add_parser('extract-frames', help='Extract frames from a video file using ffmpeg')
+    extract_parser.add_argument("video", help='Input video file (MP4/MOV/AVI/...)')
+    extract_parser.add_argument("output_dir", help='Output directory for extracted frames')
+    extract_parser.add_argument("--fps", type=float, default=None, help='Target FPS (default: keep source rate)')
+    extract_parser.add_argument("--start-frame", type=int, default=1, help='Starting frame number')
+    extract_parser.add_argument("--quality", type=int, choices=[1, 2, 3, 4, 5], default=2, help='JPEG quality (1 = best, 5 = worst)')
+    extract_parser.add_argument("--channel", default="color", help='Channel subdirectory to nest frames under (e.g. color -> color/%%08d.jpg). Empty string writes frames flat.')
+
+    import_parser = sequences_subparsers.add_parser('import-video', help='Import a video file as a new sequence in the workspace')
+    import_parser.add_argument("video", help='Input video file (MP4/MOV/AVI/...)')
+    import_parser.add_argument("--name", default=None, help='Sequence/folder name (default: video filename without extension)')
+    import_parser.add_argument("--fps", type=float, default=None, help='Target FPS (default: keep source rate)')
+    import_parser.add_argument("--quality", type=int, choices=[1, 2, 3, 4, 5], default=2, help='JPEG quality (1 = best, 5 = worst)')
+    import_parser.add_argument("--channel", default="color", help='Channel subdirectory to nest frames under (e.g. color -> channels.color=color/%%08d.jpg). Empty string writes a flat sequence.')
+    import_parser.add_argument("--workspace", default=os.getcwd(), help='Workspace path (default: current directory)')
+
+    remove_parser = sequences_subparsers.add_parser('remove', help='Remove a sequence from the workspace (its directory and list.txt entry)')
+    remove_parser.add_argument("name", help='Sequence name to remove')
+    remove_parser.add_argument("--force", "-f", action='store_true', help='Do not ask for confirmation')
+    remove_parser.add_argument("--workspace", default=os.getcwd(), help='Workspace path (default: current directory)')
+
+    list_parser = sequences_subparsers.add_parser('list', help='List sequences in the workspace')
+    list_parser.add_argument("--workspace", default=os.getcwd(), help='Workspace path (default: current directory)')
+
+    yolo_parser = sequences_subparsers.add_parser('yolo-to-vot', help='Convert a YOLO-format directory to a VOT sequence')
+    yolo_parser.add_argument("source", help='Source directory with .png + .txt YOLO pairs')
+    yolo_parser.add_argument("destination", help='Destination directory for the VOT sequence')
+    yolo_parser.add_argument("--fps", type=int, default=30, help='Frame rate to record in metadata (default: 30)')
+
+    anchors_parser = sequences_subparsers.add_parser('anchors', help='Generate anchor.value files for one or more sequences')
+    anchors_parser.add_argument("sequences", nargs='+', help='Sequence directories to process')
+    anchors_parser.add_argument("--force", action='store_true', help='Overwrite existing anchor.value files')
+
+    metadata_parser = sequences_subparsers.add_parser('metadata', help='Generate sequence metadata files for one or more sequences')
+    metadata_parser.add_argument("sequences", nargs='+', help='Sequence directories to process')
+    metadata_parser.add_argument("--fps", type=float, default=30, help='Frame rate (default: 30)')
+    metadata_parser.add_argument("--width", type=int, default=None, help='Frame width (auto-detected if omitted)')
+    metadata_parser.add_argument("--height", type=int, default=None, help='Frame height (auto-detected if omitted)')
+    metadata_parser.add_argument("--length", type=int, default=None, help='Explicit frame count')
+    metadata_parser.add_argument("--force", action='store_true', help='Overwrite existing sequence files')
+
+    reverse_parser = sequences_subparsers.add_parser('reverse', help='Reverse a VOT sequence (frame order + annotations)')
+    reverse_parser.add_argument("source", help='Source VOT sequence directory')
+    reverse_parser.add_argument("destination", help='Destination directory for the reversed sequence')
+
+    delayed_parser = sequences_subparsers.add_parser('delayed-init', help='Generate delayed-init variants by stripping leading frames')
+    delayed_parser.add_argument("source", help='Source VOT sequence directory')
+    delayed_parser.add_argument("--count", "-c", type=int, default=50, help='Frames to strip per repetition (default: 50)')
+    delayed_parser.add_argument("--repetitions", "-r", type=int, default=10, help='Number of variants to produce (default: 10)')
+    delayed_parser.add_argument("--output-base", default=None, help='Parent directory for the variants (default: source parent)')
+
+    slice_parser = sequences_subparsers.add_parser('slice', help='Copy a frame slice into a new sequence directory')
+    slice_parser.add_argument("source", help='Source VOT sequence directory')
+    slice_parser.add_argument("output_dir", help='Destination directory for the slice')
+    slice_parser.add_argument("begin_frame", type=int, help='First frame to include (1-based)')
+    slice_parser.add_argument("end_frame", type=int, help='Last frame to include (1-based, inclusive)')
+
+    subsample_parser = sequences_subparsers.add_parser('subsample', help='Keep every step-th frame of a sequence')
+    subsample_parser.add_argument("source", help='Source VOT sequence directory')
+    subsample_parser.add_argument("output_dir", help='Destination directory for the subsampled sequence')
+    subsample_parser.add_argument("step", type=int, help='Subsampling step (2 = every 2nd frame)')
+
+    size_parser = sequences_subparsers.add_parser('size-slices', help='Create test slices by object size range')
+    size_parser.add_argument("source", help='Source VOT sequence directory')
+    size_parser.add_argument("output_dir", help='Directory where slices are written')
+    size_parser.add_argument("--size-range", dest='size_ranges', action='append', required=True,
+                             help='Size range as min:max:label (repeatable)')
+    size_parser.add_argument("--target-frames", type=int, default=100, help='Target slice length (default: 100)')
+    size_parser.add_argument("--min-bbox-movements", type=float, default=1.5, help='Movement threshold (default: 1.5)')
+    size_parser.add_argument("--allow-speedup", action='store_true', help='Pick sped-up windows if they have a higher quality score')
+    size_parser.add_argument("--initial-size-only", action='store_true', help='Only require the first frame to be in the size range')
+
+    speedup_parser = sequences_subparsers.add_parser('speedup', help='Generate temporally-subsampled speedup variants')
+    speedup_parser.add_argument("source", help='Source VOT sequence directory')
+    speedup_parser.add_argument("output_dir", help='Parent directory for the generated variants')
+    speedup_parser.add_argument("--factors", nargs='+', type=int, default=[2, 3, 4, 5], help='Speedup factors (default: 2 3 4 5)')
+    speedup_parser.add_argument("--start-frame", type=int, default=0, help='First frame (0-based, default: 0)')
+    speedup_parser.add_argument("--end-frame", type=int, default=None, help='Last frame (0-based, default: last)')
+    speedup_parser.add_argument("--prefix", default=None, help='Prefix for variant directory names (default: source folder name)')
+
+    baseline_parser = sequences_subparsers.add_parser('baseline', help='Create a 1x baseline slice, optionally concatenating a second sequence')
+    baseline_parser.add_argument("source", help='Source VOT sequence directory')
+    baseline_parser.add_argument("output_dir", help='Destination directory')
+    baseline_parser.add_argument("--start-frame", type=int, default=0, help='First frame (0-based, default: 0)')
+    baseline_parser.add_argument("--end-frame", type=int, default=None, help='Last frame (0-based, default: last)')
+    baseline_parser.add_argument("--concatenate", default=None, help='Optional sequence to append after the slice')
+
     from vot import print_config
 
     try:
@@ -428,7 +703,7 @@ def main():
 
         print_config()
         
-        def check_version():
+        def check_version() -> None:
             """Check if a newer version of the toolkit is available."""
             update, version = check_updates()
             if update:
@@ -452,6 +727,8 @@ def main():
         elif args.action == "pack":
             check_version()
             do_pack(args)
+        elif args.action == "sequences":
+            do_sequences(args)
         else:
             parser.print_help()
 

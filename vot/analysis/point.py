@@ -1,7 +1,7 @@
 """This module contains the implementation of point tracking performance measures."""
 
 import numpy as np
-from typing import List, Tuple, Any
+from typing import Sequence as TSequence, Any
 
 from attributee import Include
 
@@ -9,14 +9,14 @@ from vot.tracker import Tracker
 from vot.dataset import Sequence
 from vot.experiment import Experiment
 from vot.experiment.multirun import UnsupervisedExperiment
-from vot.analysis import SeparableAnalysis, SequenceAggregator, \
-    MissingResultsException, Measure, Sorting
+from vot.analysis import Analysis, SeparableAnalysis, SequenceAggregator, \
+    MissingResultsException, Measure, Result, Sorting
 from vot.region import Point
 from vot.utilities.data import Grid
 
 THRESHOLDS = [1, 2, 4, 8, 16]
 
-def compute_point_accuracy(predicted: list, groundtruth: list, width: int, height: int, skip_first: bool = True) -> Tuple[float, ...]:
+def compute_point_accuracy(predicted: list, groundtruth: list, width: int, height: int, skip_first: bool = True) -> tuple[float, ...]:
     """Compute per-threshold accuracy and d_avg for a single point trajectory.
 
     For each frame where both prediction and groundtruth are valid points,
@@ -31,11 +31,13 @@ def compute_point_accuracy(predicted: list, groundtruth: list, width: int, heigh
     :type width: int
     :param height: Frame height in pixels.
     :type height: int
+    :param skip_first: Skip the first valid frame (initialization). Defaults to True.
+    :type skip_first: bool, optional
 
     :returns: Tuple of (d_avg, d_1, d_2, d_4, d_8, d_16, n_evaluated) where each d_t
         is the fraction of frames where normalized L2 error < t, and n_evaluated
         is the number of frames included in the computation.
-    :rtype: Tuple[float, ...]
+    :rtype: tuple[float, ...]
     """
     sx = (width - 1) / 255.0
     sy = (height - 1) / 255.0
@@ -71,11 +73,11 @@ class PointAccuracy(SeparableAnalysis):
     accuracy scores for each tracker on each sequence."""
 
     @property
-    def _title_default(self):
+    def _title_default(self) -> str:
         """Returns the default title of the analysis."""
         return "Point accuracy"
 
-    def describe(self):
+    def describe(self) -> tuple[Result | None, ...]:
         """Returns descriptions of the results produced by this analysis."""
         return (
             Measure("Average point accuracy", "d_avg", minimal=0, maximal=1, direction=Sorting.DESCENDING),
@@ -87,11 +89,11 @@ class PointAccuracy(SeparableAnalysis):
             None,  # frame count, used for weighted aggregation
         )
 
-    def compatible(self, experiment: Experiment):
+    def compatible(self, experiment: Experiment) -> bool:
         """Only compatible with unsupervised experiments."""
         return isinstance(experiment, UnsupervisedExperiment)
 
-    def subcompute(self, experiment: Experiment, tracker: Tracker, sequence: Sequence, dependencies: List[Grid]) -> Tuple[Any]:
+    def subcompute(self, experiment: Experiment, tracker: Tracker, sequence: Sequence, dependencies: list[Grid]) -> tuple[Any, ...]:
         """Compute point accuracy for a single tracker on a single sequence.
 
         :param experiment: The experiment.
@@ -101,11 +103,13 @@ class PointAccuracy(SeparableAnalysis):
         :param sequence: The sequence.
         :type sequence: Sequence
         :param dependencies: Unused.
-        :type dependencies: List[Grid]
+        :type dependencies: list[Grid]
 
         :returns: Tuple of (d_avg, d_1, d_2, d_4, d_8, d_16, n_frames).
-        :rtype: Tuple[Any]
+        :rtype: tuple[Any, ...]
         """
+        assert isinstance(experiment, UnsupervisedExperiment)
+
         trajectories = experiment.gather(tracker, sequence)
 
         if len(trajectories) == 0:
@@ -114,7 +118,7 @@ class PointAccuracy(SeparableAnalysis):
         width, height = sequence.size
 
         d_avg_sum = np.zeros(len(THRESHOLDS) + 1, dtype=np.float64)
-        n_total = 0
+        n_total: int = 0
 
         for o in sequence.objects():
             gt = [sequence.frame(i).object(o) for i in range(len(sequence))]
@@ -123,7 +127,7 @@ class PointAccuracy(SeparableAnalysis):
                 continue
             pred = trajectories_o[0].regions()
             result = compute_point_accuracy(pred, gt, width, height)
-            n = result[-1]
+            n = int(result[-1])
             if n > 0:
                 for k in range(len(THRESHOLDS) + 1):
                     d_avg_sum[k] += result[k] * n
@@ -143,15 +147,15 @@ class AveragePointAccuracy(SequenceAggregator):
     analysis = Include(PointAccuracy)
 
     @property
-    def _title_default(self):
+    def _title_default(self) -> str:
         """Returns the default title of the analysis."""
         return "Average point accuracy"
 
-    def dependencies(self):
+    def dependencies(self) -> TSequence[Analysis]:
         """Returns the dependency on PointAccuracy."""
-        return self.analysis,
+        return (self.analysis,)
 
-    def describe(self):
+    def describe(self) -> tuple[Result | None, ...]:
         """Returns descriptions of the results produced by this analysis."""
         return (
             Measure("Average point accuracy", "d_avg", minimal=0, maximal=1, direction=Sorting.DESCENDING),
@@ -163,22 +167,22 @@ class AveragePointAccuracy(SequenceAggregator):
             None,
         )
 
-    def compatible(self, experiment: Experiment):
+    def compatible(self, experiment: Experiment) -> bool:
         """Only compatible with unsupervised experiments."""
         return isinstance(experiment, UnsupervisedExperiment)
 
-    def aggregate(self, tracker: Tracker, sequences: List[Sequence], results: Grid) -> Tuple[Any]:
+    def aggregate(self, tracker: Tracker, sequences: list[Sequence], results: Grid) -> tuple[Any, ...]:
         """Aggregate per-sequence results into dataset-level scores.
 
         :param tracker: The tracker.
         :type tracker: Tracker
         :param sequences: All sequences.
-        :type sequences: List[Sequence]
+        :type sequences: list[Sequence]
         :param results: Per-sequence results from PointAccuracy.
         :type results: Grid
 
         :returns: Tuple of (d_avg, d_1, d_2, d_4, d_8, d_16, total_frames).
-        :rtype: Tuple[Any]
+        :rtype: tuple[Any, ...]
         """
         n_measures = len(THRESHOLDS) + 1
         weighted_sum = np.zeros(n_measures, dtype=np.float64)
@@ -190,8 +194,8 @@ class AveragePointAccuracy(SequenceAggregator):
             n = result[-1]
             if n > 0:
                 for k in range(n_measures):
-                    weighted_sum[k] += result[k] * n
-                n_total += n
+                    weighted_sum[k] += result[k]
+                n_total += 1
 
         if n_total == 0:
             return (0.0,) * n_measures + (0,)

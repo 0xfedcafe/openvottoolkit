@@ -1,0 +1,177 @@
+
+/* Sticky filter panel: tracker legend + per-tracker / per-subtype visibility toggles. */
+
+#control-panel {
+    position: fixed;
+    top: 60px;
+    right: 0;
+    z-index: 100;
+    width: 220px;
+    max-height: calc(100vh - 80px);
+    display: flex;
+    flex-direction: column;
+    background-color: rgba(255, 255, 255, 0.97);
+    border: 1px solid #dadada;
+    border-right: none;
+    border-radius: 6px 0 0 6px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    font-size: 13px;
+}
+
+#control-panel.collapsed {
+    width: auto;
+}
+
+#control-panel.collapsed .cp-content {
+    display: none;
+}
+
+#control-panel.collapsed #cp-collapse {
+    transform: rotate(180deg);
+}
+
+.cp-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 10px;
+    border-bottom: 1px solid #e1e1e1;
+}
+
+#control-panel.collapsed .cp-bar {
+    border-bottom: none;
+}
+
+.cp-title {
+    font-weight: bold;
+    color: #555;
+}
+
+#cp-collapse {
+    border: none;
+    background: none;
+    cursor: pointer;
+    color: #428BCA;
+    font-size: 14px;
+    line-height: 1;
+    padding: 2px 4px;
+}
+
+.cp-content {
+    overflow-y: auto;
+    padding: 4px 10px 10px 10px;
+}
+
+.cp-section {
+    margin-top: 8px;
+}
+
+.cp-section-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    font-weight: bold;
+    color: #888;
+    text-transform: uppercase;
+    font-size: 11px;
+    margin-bottom: 4px;
+}
+
+.cp-actions a {
+    color: #428BCA;
+    cursor: pointer;
+    text-decoration: none;
+    font-weight: normal;
+    text-transform: none;
+}
+
+.cp-list {
+    list-style-type: none;
+    margin: 0;
+    padding: 0;
+}
+
+.cp-list li {
+    display: flex;
+    align-items: center;
+    padding: 2px 4px;
+    border-radius: 3px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.cp-list li:hover {
+    background-color: #ebebeb;
+}
+
+.cp-list li.off {
+    opacity: 0.4;
+    text-decoration: line-through;
+}
+
+.cp-swatch {
+    display: inline-flex;
+    width: 1.1em;
+    margin-right: 6px;
+}
+
+.cp-swatch svg {
+    width: 1em;
+    height: 1em;
+}
+
+.cp-check {
+    display: block;
+    margin-top: 10px;
+    color: #555;
+    cursor: pointer;
+}
+
+/* Per-item header (title + collapse toggle). */
+
+.report-item .item-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.item-title {
+    text-align: center;
+    flex: 1;
+}
+
+.item-collapse {
+    border: none;
+    background: none;
+    cursor: pointer;
+    color: #999;
+    font-size: 15px;
+    line-height: 1;
+    padding: 0 4px;
+}
+
+.item-collapse:hover {
+    color: #428BCA;
+}
+
+.report-item.collapsed .item-body {
+    display: none;
+}
+
+.report-item.collapsed .item-title {
+    color: #999;
+}
+
+/* Filtered-out subtypes and the static heatmap twins are hidden by default. */
+
+.report-item.kind-off {
+    display: none;
+}
+
+.report-item.mpl-duplicate {
+    display: none;
+}
+
+body.show-mpl-duplicates .report-item.mpl-duplicate:not(.kind-off) {
+    display: block;
+}

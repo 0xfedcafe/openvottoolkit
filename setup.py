@@ -21,7 +21,7 @@ entrypoints = {
     'console_scripts': ['vot=vot.utilities.cli:main'],
 }
 
-for r in ["analysis", "downloader", "experiment", "indexer", "loader", "transformer"]:
+for r in ["analysis", "downloader", "experiment", "indexer", "loader", "report", "transformer"]:
     registry = join(this_directory, "data", "aliases", r + ".json")    
     if isfile(registry):
         try:
@@ -50,7 +50,7 @@ setup(name='vot-toolkit',
         "Development Status :: 4 - Beta",
         "Intended Audience :: Science/Research",
     ],
-    python_requires='>=3.7',
+    python_requires='>=3.10',
     entry_points=entrypoints,
     extras_require = {
         'jupyter':  ["ipywidgets", "jupyter", "itables"],

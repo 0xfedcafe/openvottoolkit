@@ -4,6 +4,8 @@ import os
 import re
 import shutil
 import tempfile
+import time
+import typing
 from urllib.parse import urlparse, urljoin
 
 import requests
@@ -14,7 +16,7 @@ class NetworkException(ToolkitException):
     """Exception raised when a network error occurs."""  
     pass
 
-def get_base_url(url):
+def get_base_url(url: str) -> str:
     """Returns the base url of a given url.
 
     :param url: The url to parse.
@@ -24,7 +26,7 @@ def get_base_url(url):
     :rtype: str"""
     return url.rsplit('/', 1)[0]
     
-def is_absolute_url(url):
+def is_absolute_url(url: str) -> bool:
     """Returns True if the given url is absolute.
 
     :param url: The url to parse.
@@ -35,7 +37,7 @@ def is_absolute_url(url):
     
     return bool(urlparse(url).netloc)
 
-def join_url(url_base, url_path):
+def join_url(url_base: str, url_path: str) -> str:
     """Joins a base url with a path.
 
     :param url_base: The base url.
@@ -49,7 +51,7 @@ def join_url(url_base, url_path):
         return url_path
     return urljoin(url_base, url_path)
 
-def get_url_from_gdrive_confirmation(contents):
+def get_url_from_gdrive_confirmation(contents: str) -> str:
     """Returns the url of a google drive file from the confirmation page.
 
     :param contents: The contents of the confirmation page.
@@ -75,9 +77,10 @@ def get_url_from_gdrive_confirmation(contents):
             url = url.replace('\\u003d', '=')
             url = url.replace('\\u0026', '&')
             return url
+    raise NetworkException("Unable to retrieve google drive confirmation url")
 
 
-def is_google_drive_url(url):
+def is_google_drive_url(url: str) -> bool:
     """Returns True if the given url is a google drive url.
 
     :param url: The url to parse.
@@ -88,7 +91,7 @@ def is_google_drive_url(url):
     m = re.match(r'^https?://drive.google.com/uc\?id=.*$', url)
     return m is not None
 
-def download_json(url):
+def download_json(url: str) -> dict:
     """Downloads a JSON file from the given url.
 
     :param url: The url to parse.
@@ -102,7 +105,51 @@ def download_json(url):
         raise NetworkException("Unable to read JSON file {}".format(e))
 
 
-def download(url, output, callback=None, chunk_size=1024*32, retry=10):
+class _DownloadSink:
+    """Write destination for :func:`download`.
+
+    Encapsulates the two output kinds so the download loop never has to branch on the
+    output type: a path is buffered through a temporary file (so an interrupted download
+    never corrupts the destination, and is only copied over on success), while an already
+    open binary handle is written to directly.
+    """
+
+    def __init__(self, output: str | typing.IO[bytes]) -> None:
+        """Open the underlying write handle for the given path or file handle."""
+        if isinstance(output, str):
+            self._destination: str | None = output
+            self._handle: typing.IO[bytes] = tempfile.NamedTemporaryFile(delete=False)
+            self._tempfile: str | None = self._handle.name
+        else:
+            self._destination = None
+            self._handle = output
+            self._tempfile = None
+
+    @property
+    def handle(self) -> typing.IO[bytes]:
+        """The binary handle that download chunks are written to."""
+        return self._handle
+
+    def reset(self) -> None:
+        """Rewind to the start before a fresh (non-resumable) retry."""
+        self._handle.seek(0)
+
+    def commit(self) -> None:
+        """Finalize a successful download, moving the temp file onto the destination path."""
+        if self._destination is not None and self._tempfile is not None:
+            self._handle.close()
+            shutil.copy(self._tempfile, self._destination)
+
+    def cleanup(self) -> None:
+        """Remove the temporary file, if one was used."""
+        if self._tempfile is not None and os.path.exists(self._tempfile):
+            try:
+                os.remove(self._tempfile)
+            except OSError:
+                pass
+
+
+def download(url: str, output: str | typing.IO[bytes], callback: typing.Callable | None = None, chunk_size: int = 1024*32, retry: int = 10) -> str | typing.IO[bytes]:
     """Downloads a file from the given url. Supports google drive urls. callback for
     progress report, automatically resumes download if connection is closed.
 
@@ -124,51 +171,53 @@ def download(url, output, callback=None, chunk_size=1024*32, retry=10):
     with requests.session() as sess:
 
         is_gdrive = is_google_drive_url(url)
-        
+
+        # HTTP statuses that indicate a transient condition (rate limiting or a
+        # temporary server-side error) and are therefore worth retrying. A bulk
+        # dataset download fires many requests in quick succession, so the server
+        # commonly throttles with 429/503 even though the file exists.
+        transient_statuses = {429, 500, 502, 503, 504}
+        status_attempts = 0
+
         while True:
             res = sess.get(url, stream=True)
-            
+
             if not res.status_code == 200:
-                raise NetworkException("File not available")
-            
+                if res.status_code in transient_statuses and status_attempts < retry:
+                    status_attempts += 1
+                    # Honor Retry-After when the server provides it, otherwise
+                    # back off exponentially (capped at 30s).
+                    retry_after = res.headers.get("Retry-After", "")
+                    delay = float(retry_after) if retry_after.isdigit() else min(2 ** status_attempts, 30)
+                    logger.warning("HTTP %d for %s, retrying in %.0fs (%d/%d)",
+                                   res.status_code, url, delay, status_attempts, retry)
+                    res.close()
+                    time.sleep(delay)
+                    continue
+                raise NetworkException("File not available (HTTP {}) for {}".format(res.status_code, url))
+
             if 'Content-Disposition' in res.headers:
                 # This is the file
                 break
             if not is_gdrive:
                 break
 
-            # Need to redirect with confiramtion
-            gurl = get_url_from_gdrive_confirmation(res.text)
+            # Need to redirect with confirmation. ``get_url_from_gdrive_confirmation``
+            # returns a URL or raises ``NetworkException`` if none could be found.
+            url = get_url_from_gdrive_confirmation(res.text)
 
-            if gurl is None:
-                raise NetworkException("Permission denied for {}".format(gurl))
-            url = gurl
+        total_str = res.headers.get('Content-Length')
+        if total_str is None:
+            raise NetworkException("Content-Length header missing for {}".format(url))
+        total = int(total_str)
 
-
-        if output is None:
-            if is_gdrive:
-                m = re.search('filename="(.*)"',
-                            res.headers['Content-Disposition'])
-                output = m.groups()[0]
-            else:
-                output = os.path.basename(url)
-
-        output_is_path = isinstance(output, str)
-
-        if output_is_path:
-            tmp_file = tempfile.mktemp()
-            filehandle = open(tmp_file, 'wb')
-        else:
-            tmp_file = None
-            filehandle = output
+        sink = _DownloadSink(output)
+        filehandle = sink.handle
 
         position = 0
         progress = False
 
         try:
-            total = res.headers.get('Content-Length')
-            if total is not None:
-                total = int(total)
             while True:
                 try:
                     for chunk in res.iter_content(chunk_size=chunk_size):
@@ -181,9 +230,7 @@ def download(url, output, callback=None, chunk_size=1024*32, retry=10):
                     if position < total:
                         raise requests.exceptions.RequestException("Connection closed")
 
-                    if tmp_file:
-                        filehandle.close()
-                        shutil.copy(tmp_file, output)
+                    sink.commit()
                     break
 
                 except requests.exceptions.RequestException as e:
@@ -193,7 +240,7 @@ def download(url, output, callback=None, chunk_size=1024*32, retry=10):
                         if retry < 1:
                             raise NetworkException("Unable to download file {}".format(e))
                         res = sess.get(url, stream=True)
-                        filehandle.seek(0)
+                        sink.reset()
                         position = 0
                     else:
                         logger.warning("Error when downloading file, trying to resume download")
@@ -206,16 +253,12 @@ def download(url, output, callback=None, chunk_size=1024*32, retry=10):
         except IOError as e:
             raise NetworkException("Local I/O Error when downloading file: %s" % e)
         finally:
-            try:
-                if tmp_file:
-                    os.remove(tmp_file)
-            except OSError:
-                pass
+            sink.cleanup()
 
         return output
 
 
-def download_uncompress(url, path):
+def download_uncompress(url: str, path: str) -> None:
     """Downloads a file from the given url and uncompress it to the given path.
 
     :param url: The url to parse.
@@ -226,7 +269,8 @@ def download_uncompress(url, path):
     :raises NetworkException: If the file is not available."""
     from vot.utilities import extract_files
     _, ext = os.path.splitext(urlparse(url).path)
-    tmp_file = tempfile.mktemp(suffix=ext)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as f:
+        tmp_file = f.name
     try:
         download(url, tmp_file)
         extract_files(tmp_file, path)

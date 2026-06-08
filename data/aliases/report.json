@@ -1,4 +1,8 @@
 {
     "table" : "vot.report.common.StackAnalysesTable",
-    "plots" : "vot.report.common.StackAnalysesPlots"
+    "plots" : "vot.report.common.StackAnalysesPlots",
+    "speed_plots" : "vot.report.common.SequenceSpeedPlots",
+    "failure_plots" : "vot.report.common.SequenceFailureCurvePlots",
+    "failure_heatmap" : "vot.report.heatmap.FailureHeatmap",
+    "preview_videos" : "vot.report.video.PreviewVideos"
 }

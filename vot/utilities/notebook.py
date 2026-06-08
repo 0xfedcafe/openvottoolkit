@@ -7,16 +7,18 @@ from datetime import datetime
 from threading import Condition, Thread
 
 if typing.TYPE_CHECKING:
+    import numpy.typing as npt
     from vot.experiment import Experiment
     from vot.tracker import Tracker
     from vot.workspace import Workspace
-    from vot.dataset import Sequence
+    from vot.dataset import Sequence, Frame
+    from vot.region import Region
 
 
 def is_notebook() -> bool:
     """Return True when executed inside an IPython kernel notebook."""
     try:
-        from IPython import get_ipython
+        from IPython import get_ipython  # type: ignore[import-not-found]
 
         shell = get_ipython()
         if shell is None:
@@ -27,14 +29,14 @@ def is_notebook() -> bool:
         return False
 
 
-def _require_notebook_dependencies():
+def _require_notebook_dependencies() -> tuple[typing.Any, typing.Any, typing.Any]:
     """Load notebook-only dependencies or raise a clear import error."""
     if not is_notebook():
         raise ImportError("The Jupyter notebook environment is required for visualization.")
 
     try:
-        from IPython.display import display
-        from ipywidgets import widgets
+        from IPython.display import display  # type: ignore[import-not-found]
+        from ipywidgets import widgets  # type: ignore[import-not-found]
         from vot.utilities.draw import ImageDrawHandle
     except ImportError as exc:
         raise ImportError("The IPython and ipywidgets packages are required for visualization.") from exc
@@ -48,17 +50,28 @@ def _encode_image(handle) -> bytes:
         return output.getvalue()
 
 
-def _as_list(value):
+def _frame_image(frame: "Frame") -> "npt.NDArray":
+    """Return the image array for a frame, raising if it can't be loaded."""
+    image = frame.image()
+    if image is None:
+        raise RuntimeError("Unable to load image for frame")
+    return image
+
+
+_T = typing.TypeVar("_T")
+
+
+def _as_list(value: None | _T | typing.Iterable[_T]) -> list[_T]:
     if value is None:
         return []
     if isinstance(value, (str, bytes)):
-        return [value]
+        return [value]  # type: ignore[list-item]
     if isinstance(value, Iterable):
         return list(value)
     return [value]
 
 
-def _extract_region(objects):
+def _extract_region(objects: typing.Any) -> "Region | None":
     """Extract first region from runtime frame output."""
     if objects is None:
         return None
@@ -80,12 +93,12 @@ def _extract_region(objects):
 class SequenceView(object):
     """A compact widget for showing sequence frames and regions."""
 
-    def __init__(self, sequence: "Sequence"):
+    def __init__(self, sequence: "Sequence") -> None:
         display, widgets, ImageDrawHandle = _require_notebook_dependencies()
 
         self._display = display
         self._sequence = sequence
-        self._handle = ImageDrawHandle(sequence.frame(0).image())
+        self._handle = ImageDrawHandle(_frame_image(sequence.frame(0)))
 
         self.frame = widgets.Label(value="Frame: 0")
         self.image = widgets.Image(
@@ -96,11 +109,11 @@ class SequenceView(object):
         )
         self.widget = widgets.VBox(children=(self.image, self.frame))
 
-    def set_frame(self, index: int, region=None):
+    def set_frame(self, index: int, region: "Region | None" = None) -> None:
         index = max(0, min(index, len(self._sequence) - 1))
         frame = self._sequence.frame(index)
 
-        self._handle.image(frame.image())
+        self._handle.image(_frame_image(frame))
         self._handle.style(color="green").region(frame.groundtruth())
         if region is not None:
             self._handle.style(color="red").region(region)
@@ -108,15 +121,15 @@ class SequenceView(object):
         self.image.value = _encode_image(self._handle)
         self.frame.value = "Frame: {}".format(index)
 
-    def show(self):
+    def show(self) -> None:
         self._display(self.widget)
 
 
-def visualize_tracker(tracker: "Tracker", sequence: "Sequence"):
+def visualize_tracker(tracker: "Tracker", sequence: "Sequence") -> None:
     """Visualize tracker outputs on a sequence inside a notebook."""
     display, widgets, ImageDrawHandle = _require_notebook_dependencies()
 
-    handle = ImageDrawHandle(sequence.frame(0).image())
+    handle = ImageDrawHandle(_frame_image(sequence.frame(0)))
     frame_label = widgets.Label(value="")
     frame_label.layout.display = "none"
     mirror_label = widgets.Label(value="")
@@ -134,11 +147,11 @@ def visualize_tracker(tracker: "Tracker", sequence: "Sequence"):
     state = {"frame": 0, "auto": False, "alive": True, "region": None, "restart": False}
     condition = Condition()
 
-    def update_image():
+    def update_image() -> None:
         index = max(0, min(state["frame"], len(sequence) - 1))
         frame = sequence.frame(index)
 
-        handle.image(frame.image())
+        handle.image(_frame_image(frame))
         handle.style(color="green").region(frame.groundtruth())
         if state["region"] is not None:
             handle.style(color="red").region(state["region"])
@@ -146,14 +159,18 @@ def visualize_tracker(tracker: "Tracker", sequence: "Sequence"):
         image.value = _encode_image(handle)
         frame_label.value = "Frame: {}".format(index)
 
-    def run():
+    def run() -> None:
+        from vot.tracker import OnlineTrackerRuntime, ObjectStatus
         runtime = tracker.runtime()
+        assert isinstance(runtime, OnlineTrackerRuntime), \
+            "Visualization requires an online tracker runtime"
 
         try:
             while state["alive"]:
                 if state["restart"]:
                     runtime.stop()
                     runtime = tracker.runtime()
+                    assert isinstance(runtime, OnlineTrackerRuntime)
                     state["frame"] = 0
                     state["region"] = None
                     state["restart"] = False
@@ -164,7 +181,9 @@ def visualize_tracker(tracker: "Tracker", sequence: "Sequence"):
                     break
 
                 if index == 0:
-                    objects, _ = runtime.initialize(sequence.frame(0), sequence.groundtruth(0))
+                    initial = sequence.groundtruth(0)
+                    initial_objects = ObjectStatus(initial, {}) if initial is not None else None
+                    objects, _ = runtime.initialize(sequence.frame(0), initial_objects)
                 else:
                     objects, _ = runtime.update(sequence.frame(index))
 
@@ -188,7 +207,7 @@ def visualize_tracker(tracker: "Tracker", sequence: "Sequence"):
         finally:
             runtime.stop()
 
-    def on_click(button):
+    def on_click(button: typing.Any) -> None:
         with condition:
             if button is button_next:
                 state["auto"] = False
@@ -218,7 +237,7 @@ def visualize_tracker(tracker: "Tracker", sequence: "Sequence"):
         condition.notify()
 
 
-def visualize_results(experiment: "Experiment", sequence: "Sequence", trackers=None):
+def visualize_results(experiment: "Experiment", sequence: "Sequence", trackers: "Tracker | list[Tracker]") -> None:
     """Visualize already computed experiment results for one sequence."""
     display, widgets, ImageDrawHandle = _require_notebook_dependencies()
 
@@ -230,13 +249,14 @@ def visualize_results(experiment: "Experiment", sequence: "Sequence", trackers=N
     if transformed:
         sequence = transformed[0]
 
-    tracker_trajectories = {}
-    if hasattr(experiment, "gather"):
+    tracker_trajectories: dict["Tracker", typing.Any] = {}
+    gather: typing.Callable[..., typing.Sequence[typing.Any]] | None = getattr(experiment, "gather", None)
+    if callable(gather):
         for tracker in trackers:
-            trajectories = experiment.gather(tracker, sequence)
+            trajectories = gather(tracker, sequence)
             tracker_trajectories[tracker] = trajectories[0] if trajectories else None
 
-    handle = ImageDrawHandle(sequence.frame(0).image())
+    handle = ImageDrawHandle(_frame_image(sequence.frame(0)))
     image = widgets.Image(
         value=_encode_image(handle),
         format="png",
@@ -254,11 +274,11 @@ def visualize_results(experiment: "Experiment", sequence: "Sequence", trackers=N
 
     colors = ["red", "blue", "orange", "purple", "yellow"]
 
-    def update_image():
+    def update_image() -> None:
         index = max(0, min(state["frame"], len(sequence) - 1))
         frame = sequence.frame(index)
 
-        handle.image(frame.image())
+        handle.image(_frame_image(frame))
         handle.style(color="green").region(frame.groundtruth())
 
         for i, tracker in enumerate(trackers):
@@ -270,7 +290,7 @@ def visualize_results(experiment: "Experiment", sequence: "Sequence", trackers=N
         image.value = _encode_image(handle)
         frame_label.value = "Frame: {}".format(index)
 
-    def run():
+    def run() -> None:
         while state["alive"]:
             update_image()
 
@@ -289,7 +309,7 @@ def visualize_results(experiment: "Experiment", sequence: "Sequence", trackers=N
                 if state["frame"] < len(sequence) - 1:
                     state["frame"] += 1
 
-    def on_click(button):
+    def on_click(button: typing.Any) -> None:
         with condition:
             if button is button_next:
                 state["auto"] = False
@@ -320,11 +340,11 @@ def visualize_results(experiment: "Experiment", sequence: "Sequence", trackers=N
 
 def run_experiment(
     experiment: "Experiment",
-    sequences: typing.List["Sequence"],
-    trackers: typing.List["Tracker"],
+    sequences: list["Sequence"],
+    trackers: list["Tracker"],
     force: bool = False,
     persist: bool = False,
-):
+) -> bool:
     """Run an experiment for one or more trackers from a notebook."""
     display, widgets, _ImageDrawHandle = _require_notebook_dependencies()
 
@@ -361,7 +381,7 @@ def run_experiment(
                     tracker.identifier, sequence.name, j + 1, n_sequences
                 )
 
-                def _callback(p, _base=base):
+                def _callback(p: float, _base: int = base) -> None:
                     progress_bar.value = _base + min(1.0, max(0.0, p))
 
                 try:
@@ -387,13 +407,13 @@ def run_experiment(
 
 def run_analysis(
     workspace: "Workspace",
-    trackers: typing.List["Tracker"],
-    sequences: typing.Optional[typing.List[str]] = None,
-    experiments: typing.Optional[typing.List[str]] = None,
-    output_format: typing.Optional[str] = None,
-    name: typing.Optional[str] = None,
-    **kwargs,
-):
+    trackers: list["Tracker"] | list[str],
+    sequences: list[str] | None = None,
+    experiments: list[str] | None = None,
+    output_format: str | None = None,
+    name: str | None = None,
+    **kwargs: typing.Any,
+) -> typing.Any:
     """Run stack analyses from a notebook and optionally serialize outputs."""
     if not is_notebook():
         raise ImportError("The Jupyter notebook environment is required for visualization.")
@@ -403,22 +423,28 @@ def run_analysis(
     if kwargs:
         raise TypeError("Unexpected keyword arguments: {}".format(", ".join(kwargs.keys())))
 
-    trackers = _as_list(trackers)
-    sequences = _as_list(sequences) if sequences is not None else None
-    experiments = _as_list(experiments) if experiments is not None else None
+    tracker_list = _as_list(trackers)
+    sequence_names = _as_list(sequences) if sequences is not None else None
+    experiment_names = _as_list(experiments) if experiments is not None else None
 
-    if trackers and isinstance(trackers[0], str):
-        trackers = workspace.registry.resolve(
-            *trackers,
+    if tracker_list and isinstance(tracker_list[0], str):
+        str_trackers: list[str] = [t for t in tracker_list if isinstance(t, str)]
+        assert len(str_trackers) == len(tracker_list), "Tracker list must be all strings or all Tracker instances"
+        resolved_trackers: list["Tracker"] = workspace.registry.resolve(
+            *str_trackers,
             storage=workspace.storage.substorage("results"),
             skip_unknown=False,
         )
+    else:
+        from vot.tracker import Tracker as _Tracker
+        resolved_trackers = [t for t in tracker_list if isinstance(t, _Tracker)]
+        assert len(resolved_trackers) == len(tracker_list), "Tracker list must be all Tracker instances or all strings"
 
     from vot.analysis import process_stack_analyses
     from vot.report import generate_serialized
 
     try:
-        results = process_stack_analyses(workspace, trackers, sequences, experiments)
+        results = process_stack_analyses(workspace, resolved_trackers, sequence_names, experiment_names)
 
         if results is None:
             return None
@@ -430,9 +456,9 @@ def run_analysis(
             if name is None:
                 name = "{:%Y-%m-%dT%H-%M-%S.%f%z}".format(datetime.now())
 
-            selected = workspace.dataset if sequences is None else [s for s in workspace.dataset if s.name in sequences]
+            selected = list(workspace.dataset) if sequence_names is None else [s for s in workspace.dataset if s.name in sequence_names]
             storage = workspace.storage.substorage("analysis")
-            generate_serialized(trackers, selected, results, storage, output_format, name)
+            generate_serialized(resolved_trackers, selected, results, storage, output_format, name)
 
             return {"results": results, "name": name, "format": output_format}
 

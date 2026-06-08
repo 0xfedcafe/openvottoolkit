@@ -75,7 +75,8 @@ Field reference:
 
 Optional fields:
 
-* `tags = fast,baseline` - comma-separated tags,
+* `tags = fast,baseline` - comma-separated tags; a tag can then be used on the command line
+  as a `#<tag>` reference to select every tracker carrying it (see :doc:`../cli`),
 * `env_PATH = /opt/mydeps/bin:${PATH}` - environment variables (`env_<NAME>`),
 * `arg_model = /models/model.onnx` - protocol arguments (`arg_<name>`),
 * protocol-specific options, e.g. `timeout = 60` or `convert = mask` (for folder-based conversion).

@@ -3,7 +3,7 @@
 Stacks are used to organize experiments and to run them in batch mode.
 """
 import os
-from typing import List, Mapping
+from typing import Mapping, Iterator
 
 import yaml
 
@@ -13,7 +13,7 @@ from attributee.io import Serializable
 from vot.experiment import Experiment, experiment_registry
 
 
-def experiment_resolver(typename, context, **kwargs):
+def experiment_resolver(typename: str, context, **kwargs) -> Experiment:
     """Resolves experiment objects from stack definitions. This function is used by the
     stack module to resolve experiment objects from stack definitions. It is not
     intended to be used directly.
@@ -29,12 +29,14 @@ def experiment_resolver(typename, context, **kwargs):
     :rtype: Experiment"""
 
     from vot.utilities import import_class
+    # Imported lazily: a module-level import would create a circular import
+    # (vot.stack -> vot.workspace.storage -> vot.workspace -> vot.stack).
+    from vot.workspace.storage import NullStorage
 
     identifier = context.key
-    storage = None
 
-    if getattr(context.parent, "workspace", None) is not None:
-        storage = context.parent.workspace.storage
+    workspace = getattr(context.parent, "workspace", None)
+    storage = workspace.storage if workspace is not None else NullStorage()
 
     if typename in experiment_registry:
         experiment = experiment_registry.get(typename, _identifier=identifier, _storage=storage, **kwargs)
@@ -58,19 +60,19 @@ class Stack(Attributee, Serializable):
     experiments = Map(Object(experiment_resolver))
 
     @property
-    def name(self):
+    def name(self) -> str | None:
         """Returns the name of the stack."""
         return getattr(self, "_name", None)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Experiment]:
         """Iterates over experiments in the stack."""
-        return iter(self.experiments.values())
+        return iter(self.experiments.values()) # type: ignore
 
-    def __len__(self):
+    def __len__(self) -> int:
         """Returns the number of experiments in the stack."""
-        return len(self.experiments)
+        return len(self.experiments) # type: ignore
 
-    def __getitem__(self, identifier):
+    def __getitem__(self, identifier: str) -> Experiment:
         """Returns the experiment with the given identifier.
 
         :param identifier: Identifier of the experiment
@@ -79,16 +81,16 @@ class Stack(Attributee, Serializable):
         :returns: Experiment object
         :rtype: Experiment"""
         return self.experiments[identifier]
-    
 
-def resolve_stack(name: str, *directories: List[str]) -> str:
+
+def resolve_stack(name: str, *directories: str) -> str | None:
     """Searches for stack file in the given directories and returns its absolute path.
     If given an absolute path as input it simply returns it.
 
-    :param name: Name of the stack
+    :param name: Name of the stack or absolute path to the stack file
     :type name: str
     :param directories: Directories that will be used
-    :type directories: List[str]
+    :type directories: list[str]
 
     :returns: Absolute path to stack file
     :rtype: str"""

@@ -4,7 +4,7 @@ import os
 import math
 import tempfile
 
-from vot.dataset import BasedSequence
+from vot.dataset import Sequence
 from vot.region import Rectangle
 from vot.region.io import write_trajectory
 from vot.utilities import write_properties
@@ -12,7 +12,7 @@ from vot.utilities import write_properties
 from PIL import Image
 import numpy as np
 
-def _generate(base, length, size, objects):
+def _generate(base: str, length: int, size: tuple, objects: int) -> None:
     """Generate a new dummy sequence.
 
     :param base: The base directory for the sequence.
@@ -83,7 +83,7 @@ def _generate(base, length, size, objects):
                         "channel.default": "color"}
     write_properties(os.path.join(base, "sequence"), metadata)
 
-def generate_dummy(length=100, size=(640, 480), objects=1):
+def generate_dummy(length: int = 100, size: tuple = (640, 480), objects: int = 1) -> Sequence:
         """Create a new dummy sequence.
 
         :param length: The length of the sequence. Defaults to 100.

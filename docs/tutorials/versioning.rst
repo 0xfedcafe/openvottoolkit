@@ -20,6 +20,7 @@ Versioning behavior is defined by `vot.tracker.Registry` and `vot.tracker.Tracke
 * tracker references use the form `identifier@version`,
 * `Registry.resolve("identifier@version")` returns that specific version,
 * `Registry.resolve("identifier@", storage=...)` resolves all available versions found in results storage,
+* `Registry.resolve("#tag")` resolves every tracker carrying that tag (plural reference),
 * `Tracker.reversion(version)` creates a versioned view of the same tracker definition,
 * tracker identifiers must be unique inside a resolved registry set.
 

@@ -1,41 +1,25 @@
 
-from typing import List, Dict
+from typing import Any, Iterable
 
 import subprocess
-import shlex
 import shutil
-import sys
 import os
 import time
 import tempfile
+from types import TracebackType
 
 from vot import log_debug
 from vot.region import Region, Mask, Rectangle, Point, Polygon
 from vot.region.io import parse_region
 from vot.tracker import Tracker, TrackerRuntime, ObjectQuery, ObjectStatus, RunQueries, RunResult
 from vot.dataset import Frame
+from vot.tracker.helpers import convert_region, spawn_process
 
-def make_temporary_folder():
+def make_temporary_folder() -> str:
     """Creates a temporary folder and returns its path."""
     return tempfile.mkdtemp(prefix="tracker_folder_")
 
-def convert_region(region: Region, target: str):
-    if target is None:
-        return region
-    
-    target = target.lower()
-    if target == "mask":
-        return Mask.convert(region)
-    elif target == "rectangle":
-        return Rectangle.convert(region)
-    elif target == "point":
-        return Point.convert(region)
-    elif target == "polygon":
-        return Polygon.convert(region)
-    else:
-        raise ValueError(f"Unknown target region type: {target}")
-
-def generate_query_file(folder: str, oid: str, query: ObjectQuery, convert=None):
+def generate_query_file(folder: str, oid: str, query: ObjectQuery, convert: str | None = None) -> None:
     """Generates a query file for the given object query in the specified folder."""
     filename = os.path.join(folder, f"query_{oid}.txt")
     
@@ -45,7 +29,7 @@ def generate_query_file(folder: str, oid: str, query: ObjectQuery, convert=None)
         for key, value in query.properties.items():
             f.write(f"{key}={value}\n")
 
-def generate_input_data(folder: str, frames: List[Frame], queries: Dict[str, ObjectQuery], convert=None):
+def generate_input_data(folder: str, frames: list[Frame], queries: dict[str, ObjectQuery], convert: str | None = None) -> None:
     """Generates the input data for the tracker in the specified folder."""
     # Generate frames file
     channels = set()
@@ -63,7 +47,7 @@ def generate_input_data(folder: str, frames: List[Frame], queries: Dict[str, Obj
     for oid, query in queries.items():
         generate_query_file(folder, oid, query, convert=convert)
 
-def parse_output(folder: str, oid: str) -> List[ObjectStatus]:
+def parse_output(folder: str, oid: str) -> list[ObjectStatus]:
     """Parses the output file for the given object id in the specified folder."""
     filename = os.path.join(folder, f"output_{oid}.txt")
     if not os.path.exists(filename):
@@ -88,7 +72,7 @@ def parse_output(folder: str, oid: str) -> List[ObjectStatus]:
 
     return status
 
-def parse_outputs(folder: str, oids: List[str]) -> Dict[str, List[ObjectStatus]]:
+def parse_outputs(folder: str, oids: list[str]) -> dict[str, list[ObjectStatus]]:
     """Parses the output files for the given object ids in the specified folder."""
     return {oid: parse_output(folder, oid) for oid in oids}
 
@@ -129,16 +113,17 @@ class TrackerFolderRuntime(TrackerRuntime):
     Additionally, the tracker may return optional values for the object in the form of “output_<ID>_<VALUE>.txt”, where each frame's values are provided.
     """
     
-    def __init__(self, tracker: Tracker, command: str, log: bool = False, timeout: int = 30, linkpaths=None, envvars=None, arguments=None, **kwargs):
+    def __init__(self, tracker: Tracker, command: str, log: bool = False, timeout: int = 30, linkpaths: str | list[str] | None = None, envvars: dict[str, str] | None = None, arguments: dict[str, Any] | None = None, **kwargs: Any) -> None:
         """Initializes the tracker runtime.
 
-            tracker (Tracker) -- The tracker to run.
-            command (str) -- The command to run the tracker.
-            log (bool) -- Whether to log the tracker output.
-            timeout (int) -- The timeout for the tracker process in seconds.
-            linkpaths (list) -- The paths to link to the tracker process.
-            envvars (dict) -- The environment variables to set for the tracker process.
-            arguments (dict) -- The additional arguments.
+        :param tracker: The tracker to run.
+        :param command: The command to run the tracker.
+        :param log: Whether to log the tracker output.
+        :param timeout: The timeout for the tracker process in seconds.
+        :param linkpaths: The paths to link to the tracker process.
+        :param envvars: The environment variables to set for the tracker process.
+        :param arguments: The additional arguments.
+        :param kwargs: Additional options; ``convert`` sets the target region type passed to ``convert_region``.
         """
         super().__init__(tracker)
         self.folder = None
@@ -150,35 +135,40 @@ class TrackerFolderRuntime(TrackerRuntime):
         self._arguments = arguments
         self._convert = kwargs.get("convert", None)
         
-    def __enter__(self):
+    def __enter__(self) -> "TrackerFolderRuntime":
         return self
     
-    def stop(self):
+    def stop(self) -> None:
         if self.folder is not None:
             shutil.rmtree(self.folder)
             self.folder = None
     
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __exit__(self, exc_type: type[BaseException] | None, exc_value: BaseException | None, traceback: TracebackType | None) -> None:
         self.stop()
         
-    def run(self, frames: List[Frame], queries: RunQueries) -> RunResult:
-        
+    def run(self, frames: Iterable[Frame], queries: RunQueries) -> RunResult:
+
         if self.folder is not None:
             raise RuntimeError("Tracker is already running")
-        
+
         self.folder = make_temporary_folder()
-        
-        # Generate unique query ids for each query object
+
+        # Materialize the iterable so we can index and ``len()`` it below.
+        frames_list = list(frames)
+
+        # Generate unique query ids for each query object. The folder runtime
+        # internally addresses queries by string id (per-object files); the public
+        # interface accepts a ``RunQueries`` list, so we project to a dict here.
         query_keys = [f"obj{i}" for i in range(len(queries))]
-        queries = {key: query for query, key in zip(queries, query_keys)}
-        
-        generate_input_data(self.folder, frames, queries, convert=self._convert)
+        queries_by_id: dict[str, ObjectQuery] = {key: query for query, key in zip(queries, query_keys)}
+
+        generate_input_data(self.folder, frames_list, queries_by_id, convert=self._convert)
 
         # For consistency with the online tracker runtime,
         # we set the timeout to be the specified timeout 
         # multiplied by the number of frames, if the timeout 
         # is specified and greater than 0. Otherwise, we set it to None (no timeout).
-        timeout = None if self._timeout is None or self._timeout <= 0 else self._timeout * len(frames)
+        timeout = None if self._timeout is None or self._timeout <= 0 else self._timeout * len(frames_list)
 
         environment = dict(os.environ)
         if self._envvars is not None:
@@ -188,29 +178,13 @@ class TrackerFolderRuntime(TrackerRuntime):
         
         log_debug(f"Running tracker with command: {self._command} in folder: {self.folder}")
         
-        if sys.platform.startswith("win"):
-            process = subprocess.Popen(
-                    self._command,
-                    cwd=self.folder,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    env=environment, bufsize=0, close_fds=False)
-        else:
-            process = subprocess.Popen(
-                    shlex.split(self._command),
-                    shell=False,
-                    cwd=self.folder,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    env=environment, bufsize=0, close_fds=False)
+        process = spawn_process(self._command, self.folder, environment)
         try:
             
             output_data, _ = process.communicate(timeout=timeout)
 
             total_time = time.time() - start_time
-            frame_time = total_time / len(frames)
+            frame_time = total_time / len(frames_list)
 
         except subprocess.TimeoutExpired as te:
             process.kill()
@@ -224,27 +198,27 @@ class TrackerFolderRuntime(TrackerRuntime):
             log_debug(f"Tracker process output:\n{output_data}")
             self.stop()
             
-            raise RuntimeError(f"Tracker process exited with code {process.returncode}")
+            raise RuntimeError(f"Tracker process exited with code {process.returncode}. Output:\n{output_data}")
         
         try:
             
-            objects = parse_outputs(self.folder, list(queries.keys()))
+            objects = parse_outputs(self.folder, list(queries_by_id.keys()))
             
             objects = [objects[key] for key in query_keys]
             
             # Verify the output trajectories have the same length as the number of frames
             for obj in objects:
-                if len(obj) != len(frames):
+                if len(obj) != len(frames_list):
                     self.stop()
-                    raise RuntimeError(f"Output trajectory length {len(obj)} does not match number of frames {len(frames)}")
+                    raise RuntimeError(f"Output trajectory length {len(obj)} does not match number of frames {len(frames_list)}")
             
-            return RunResult(objects, [frame_time] * len(frames))
+            return RunResult(objects, [frame_time] * len(frames_list))
         except Exception as e:
             self.stop()
             raise RuntimeError("Failed to parse tracker output") from e
     
     @property      
-    def multiobject(self):
+    def multiobject(self) -> bool:
         return True
     
 from vot.tracker import register_runtime_protocol

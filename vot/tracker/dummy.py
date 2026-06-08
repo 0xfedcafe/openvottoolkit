@@ -5,7 +5,7 @@ import os
 from sys import path
 import time
 
-def _main_trax():
+def _main_trax() -> None:
     """Dummy TraX tracker main function for testing purposes."""
     from trax import Image, Region, Server, TraxStatus
 
@@ -20,14 +20,14 @@ def _main_trax():
             server.status(objects)
             time.sleep(0.1)
 
-def _main_folder():
+def _main_folder() -> None:
     """Dummy tracker main function for testing purposes."""
    
     from vot.region.io import parse_region
    
     # Use the folder protocol, specified in vot.tracker.folder
    
-    # List all files fllowing the pattern frames_*.txt in the current folder
+    # List all files following the pattern frames_*.txt in the current folder
     frames = [f for f in os.listdir() if f.startswith("frames_") and f.endswith(".txt")]
    
     # List all files following the pattern query_*.txt in the current folder

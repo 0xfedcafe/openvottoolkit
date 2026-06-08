@@ -1,7 +1,7 @@
 """This module contains the implementation of the accuracy-robustness analysis and EAO
 analysis for the multistart experiment."""
 
-from typing import List, Tuple, Any
+from typing import Sequence as TSequence, Any
 
 import numpy as np
 
@@ -13,44 +13,44 @@ from vot.dataset.proxy import FrameMapSequence
 from vot.experiment import Experiment
 from vot.experiment.multistart import MultiStartExperiment, find_anchors
 from vot.region import calculate_overlaps
-from vot.analysis import MissingResultsException, Measure, Plot, Analysis, Axes, \
+from vot.analysis import MissingResultsException, Measure, Result, Plot, Analysis, Axes, \
     Sorting, SeparableAnalysis, Curve, Point, SequenceAggregator
 from vot.utilities.data import Grid
 
-def compute_eao_partial(overlaps: List, success: List[bool], curve_length: int):
+def compute_eao_partial(overlaps: list[list[float]], success: list[bool], curve_length: int) -> tuple[list[float], list[float]]:
     """Compute the EAO curve for a single sequence. The curve is computed as the average
     overlap at each frame.
 
     :param overlaps: List of overlaps for each frame.
-    :type overlaps: List
+    :type overlaps: list[list[float]]
     :param success: List of success flags for each frame.
-    :type success: List[bool]
+    :type success: list[bool]
     :param curve_length: Length of the curve.
     :type curve_length: int
 
-    :returns: EAO curve.
-    :rtype: List[float]"""
-    phi = curve_length * [float(0)]
-    active = curve_length * [float(0)]
+    :returns: EAO curve and per-frame active counts.
+    :rtype: tuple[list[float], list[float]]"""
+    phi: list[float] = curve_length * [0.0]
+    active: list[float] = curve_length * [0.0]
 
-    for o, success in zip(overlaps, success):
+    for o, succeeded in zip(overlaps, success):
 
         o_array = np.array(o)
 
         for j in range(1, curve_length):
 
             if j < len(o):
-                phi[j] += np.mean(o_array[1:j+1])
+                phi[j] += float(np.mean(o_array[1:j+1]))
                 active[j] += 1
-            elif not success:
-                phi[j] += np.sum(o_array[1:len(o)]) / (j - 1)
+            elif not succeeded:
+                phi[j] += float(np.sum(o_array[1:len(o)]) / (j - 1))
                 active[j] += 1
 
-    phi = [p / a if a > 0 else 0 for p, a in zip(phi, active)]
+    phi = [p / a if a > 0 else 0.0 for p, a in zip(phi, active)]
     return phi, active
 
 class AccuracyRobustness(SeparableAnalysis):
-    """This analysis computes the accuracy-robustness curve for the multistart
+    """This analysis computes accuracy and robustness measures for the multistart
     experiment."""
 
     burnin = Integer(default=10, val_min=0)
@@ -60,11 +60,11 @@ class AccuracyRobustness(SeparableAnalysis):
     ignore_masks = String(default="_ignore", description="Object ID used to get ignore masks.")
 
     @property
-    def _title_default(self):
+    def _title_default(self) -> str:
         """Title of the analysis."""
         return "AR Analysis"
 
-    def describe(self):
+    def describe(self) -> tuple[Result | None, ...]:
         """Return the description of the analysis."""
         return Measure("Accuracy", "A", minimal=0, maximal=1, direction=Sorting.DESCENDING), \
              Measure("Robustness", "R", minimal=0, direction=Sorting.DESCENDING), \
@@ -72,14 +72,14 @@ class AccuracyRobustness(SeparableAnalysis):
                 minimal=(0, 0), maximal=(1, 1), labels=("Robustness", "Accuracy"), trait="ar"), \
              None, None
 
-    def compatible(self, experiment: Experiment):
+    def compatible(self, experiment: Experiment) -> bool:
         """Check if the experiment is compatible with the analysis.
 
         The experiment must be a multistart experiment.
         """
         return isinstance(experiment, MultiStartExperiment)
 
-    def subcompute(self, experiment: Experiment, tracker: Tracker, sequence: Sequence, dependencies: List[Grid]) -> Tuple[Any]:
+    def subcompute(self, experiment: Experiment, tracker: Tracker, sequence: Sequence, dependencies: list[Grid]) -> tuple[Any, ...]:
         """Compute the accuracy-robustness for each sequence.
 
         :param experiment: Experiment.
@@ -89,10 +89,12 @@ class AccuracyRobustness(SeparableAnalysis):
         :param sequence: Sequence.
         :type sequence: Sequence
         :param dependencies: List of dependencies.
-        :type dependencies: List[Grid]
+        :type dependencies: list[Grid]
 
         :returns: Accuracy, robustness, AR curve, robustness, length of the sequence.
-        :rtype: Tuple[Any]"""
+        :rtype: tuple[Any, ...]"""
+
+        assert isinstance(experiment, MultiStartExperiment)
 
         results = experiment.results(tracker, sequence)
 
@@ -101,9 +103,9 @@ class AccuracyRobustness(SeparableAnalysis):
         if not forward and not backward:
             raise RuntimeError("Sequence does not contain any anchors")
 
-        robustness = 0
-        accuracy = 0
-        total = 0
+        robustness: float = 0.0
+        accuracy: float = 0.0
+        total: int = 0
         for i, reverse in [(f, False) for f in forward] + [(f, True) for f in backward]:
             name = "%s_%08d" % (sequence.name, i)
 
@@ -111,7 +113,7 @@ class AccuracyRobustness(SeparableAnalysis):
                 raise MissingResultsException()
 
             if reverse:
-                proxy = FrameMapSequence(sequence, list(reversed(range(0, i + 1))))
+                proxy: Sequence = FrameMapSequence(sequence, list(reversed(range(0, i + 1))))
             else:
                 proxy = FrameMapSequence(sequence, list(range(i, len(sequence))))
 
@@ -119,13 +121,17 @@ class AccuracyRobustness(SeparableAnalysis):
 
             masks = proxy.object(self.ignore_masks)
 
-            overlaps = calculate_overlaps(trajectory.regions(), proxy.groundtruth(), (proxy.size) if self.burnin else None, ignore=masks)
+            proxy_groundtruth = proxy.groundtruth()
+            assert proxy_groundtruth is not None, f"Missing groundtruth for proxy sequence {name}"
+
+            overlaps = calculate_overlaps(trajectory.regions(), proxy_groundtruth, proxy.size if self.bounded else None, ignore=masks)
 
             grace = self.grace
             progress = len(proxy)
 
             for j, overlap in enumerate(overlaps):
-                if overlap <= self.threshold and not proxy.groundtruth(j).is_empty():
+                gt_j = proxy.groundtruth(j)
+                if overlap <= self.threshold and gt_j is not None and not gt_j.is_empty():
                     grace = grace - 1
                     if grace == 0:
                         progress = j + 1 - self.grace  # subtract since we need actual point of the failure
@@ -137,9 +143,9 @@ class AccuracyRobustness(SeparableAnalysis):
             accuracy += sum(overlaps[0:progress])
             total += len(proxy)
 
-        ar = (robustness / total, accuracy / robustness if robustness > 0 else 0)
+        ar = (robustness / total, accuracy / robustness if robustness > 0 else 0.0)
 
-        return accuracy / robustness if robustness > 0 else 0, robustness / total, ar, robustness, len(sequence)
+        return accuracy / robustness if robustness > 0 else 0.0, robustness / total, ar, robustness, len(sequence)
 
 class AverageAccuracyRobustness(SequenceAggregator):
     """This analysis computes the average accuracy-robustness curve for the multistart
@@ -148,15 +154,15 @@ class AverageAccuracyRobustness(SequenceAggregator):
     analysis = Include(AccuracyRobustness)
 
     @property
-    def _title_default(self):
+    def _title_default(self) -> str:
         """Title of the analysis."""
         return "AR Analysis"
 
-    def dependencies(self):
+    def dependencies(self) -> TSequence[Analysis]:
         """Return the dependencies of the analysis."""
-        return self.analysis, 
+        return (self.analysis,)
 
-    def describe(self):
+    def describe(self) -> tuple[Result | None, ...]:
         """Return the description of the analysis."""
         return Measure("Accuracy", "A", minimal=0, maximal=1, direction=Sorting.DESCENDING), \
              Measure("Robustness", "R", minimal=0, direction=Sorting.DESCENDING), \
@@ -164,25 +170,25 @@ class AverageAccuracyRobustness(SequenceAggregator):
                 minimal=(0, 0), maximal=(1, 1), labels=("Robustness", "Accuracy"), trait="ar"), \
              None, None
 
-    def compatible(self, experiment: Experiment):
+    def compatible(self, experiment: Experiment) -> bool:
         """Check if the experiment is compatible with the analysis.
 
         The experiment must be a multistart experiment.
         """
         return isinstance(experiment, MultiStartExperiment)
 
-    def aggregate(self, tracker: Tracker, sequences: List[Sequence], results: Grid):
+    def aggregate(self, tracker: Tracker, sequences: list[Sequence], results: Grid) -> tuple[Any, ...]:
         """Aggregate the results of the analysis.
 
         :param tracker: Tracker.
         :type tracker: Tracker
         :param sequences: List of sequences.
-        :type sequences: List[Sequence]
+        :type sequences: list[Sequence]
         :param results: Grid of results.
         :type results: Grid
 
         :returns: Aggregated results.
-        :rtype: Tuple[Any]"""
+        :rtype: tuple[Any, ...]"""
         total_accuracy = 0
         total_robustness = 0
         weight_accuracy = 0
@@ -199,8 +205,8 @@ class AverageAccuracyRobustness(SequenceAggregator):
         return total_accuracy / weight_accuracy, total_robustness / weight_robustness, ar, weight_accuracy, weight_robustness
 
 class MultiStartFragments(SeparableAnalysis):
-    """This analysis computes the accuracy-robustness curve for the multistart
-    experiment."""
+    """This analysis computes per-fragment success and accuracy curves for the
+    multistart experiment."""
 
     burnin = Integer(default=10, val_min=0)
     grace = Integer(default=10, val_min=0)
@@ -209,22 +215,22 @@ class MultiStartFragments(SeparableAnalysis):
     ignore_masks = String(default="_ignore", description="Object ID used to get ignore masks.")
 
     @property
-    def _title_default(self):
+    def _title_default(self) -> str:
         """Title of the analysis."""
         return "Fragment Analysis"
 
-    def describe(self):
+    def describe(self) -> tuple[Result | None, ...]:
         """Return the description of the analysis."""
         return Curve("Success", 2, "Sc", minimal=(0, 0), maximal=(1,1), trait="points"), Curve("Accuracy", 2, "Ac", minimal=(0, 0), maximal=(1,1), trait="points")
 
-    def compatible(self, experiment: Experiment):
+    def compatible(self, experiment: Experiment) -> bool:
         """Check if the experiment is compatible with the analysis.
 
         The experiment must be a multistart experiment.
         """
         return isinstance(experiment, MultiStartExperiment)
 
-    def subcompute(self, experiment: Experiment, tracker: Tracker, sequence: Sequence, dependencies: List[Grid]) -> Tuple[Any]:
+    def subcompute(self, experiment: Experiment, tracker: Tracker, sequence: Sequence, dependencies: list[Grid]) -> tuple[Any, ...]:
         """Compute the analysis for a single sequence. The sequence must contain at
         least one anchor.
 
@@ -235,10 +241,12 @@ class MultiStartFragments(SeparableAnalysis):
         :param sequence: Sequence.
         :type sequence: Sequence
         :param dependencies: List of dependencies.
-        :type dependencies: List[Grid]
+        :type dependencies: list[Grid]
 
         :returns: Results of the analysis.
-        :rtype: Tuple[Any]"""
+        :rtype: tuple[Any, ...]"""
+
+        assert isinstance(experiment, MultiStartExperiment)
 
         results = experiment.results(tracker, sequence)
 
@@ -247,8 +255,8 @@ class MultiStartFragments(SeparableAnalysis):
         if not forward and not backward:
             raise RuntimeError("Sequence does not contain any anchors")
 
-        accuracy = []
-        success = []
+        accuracy: list[tuple[float, float]] = []
+        success: list[tuple[float, float]] = []
 
         for i, reverse in [(f, False) for f in forward] + [(f, True) for f in backward]:
             name = "%s_%08d" % (sequence.name, i)
@@ -257,7 +265,7 @@ class MultiStartFragments(SeparableAnalysis):
                 raise MissingResultsException()
 
             if reverse:
-                proxy = FrameMapSequence(sequence, list(reversed(range(0, i + 1))))
+                proxy: Sequence = FrameMapSequence(sequence, list(reversed(range(0, i + 1))))
             else:
                 proxy = FrameMapSequence(sequence, list(range(i, len(sequence))))
 
@@ -265,13 +273,17 @@ class MultiStartFragments(SeparableAnalysis):
 
             masks = proxy.object(self.ignore_masks)
 
-            overlaps = calculate_overlaps(trajectory.regions(), proxy.groundtruth(), (proxy.size) if self.burnin else None, ignore=masks)
+            proxy_groundtruth = proxy.groundtruth()
+            assert proxy_groundtruth is not None, f"Missing groundtruth for proxy sequence {name}"
+
+            overlaps = calculate_overlaps(trajectory.regions(), proxy_groundtruth, proxy.size if self.bounded else None, ignore=masks)
 
             grace = self.grace
             progress = len(proxy)
 
             for j, overlap in enumerate(overlaps):
-                if overlap <= self.threshold and not proxy.groundtruth(j).is_empty():
+                gt_j = proxy.groundtruth(j)
+                if overlap <= self.threshold and gt_j is not None and not gt_j.is_empty():
                     grace = grace - 1
                     if grace == 0:
                         progress = j + 1 - self.grace  # subtract since we need actual point of the failure
@@ -279,8 +291,8 @@ class MultiStartFragments(SeparableAnalysis):
                 else:
                     grace = self.grace
 
-            success.append( (i / len(sequence), progress / len(proxy)))
-            accuracy.append( (i / len(sequence), sum(overlaps[0:progress] / len(proxy))))
+            success.append((i / len(sequence), progress / len(proxy)))
+            accuracy.append((i / len(sequence), sum(overlaps[0:progress]) / len(proxy)))
 
         return success, accuracy
 
@@ -298,22 +310,22 @@ class EAOCurves(SeparableAnalysis):
     high = Integer()
 
     @property
-    def _title_default(self):
+    def _title_default(self) -> str:
         """Title of the analysis."""
         return "EAO Curve"
 
-    def describe(self):
+    def describe(self) -> tuple[Result | None, ...]:
         """Return the description of the analysis."""
         return Plot("Expected average overlap", "EAO", minimal=0, maximal=1, wrt="frames", trait="eao"),
 
-    def compatible(self, experiment: Experiment):
+    def compatible(self, experiment: Experiment) -> bool:
         """Check if the experiment is compatible with the analysis.
 
         The experiment must be a multistart experiment.
         """
         return isinstance(experiment, MultiStartExperiment)
 
-    def subcompute(self, experiment: Experiment, tracker: Tracker, sequence: Sequence, dependencies: List[Grid]) -> Tuple[Any]:
+    def subcompute(self, experiment: Experiment, tracker: Tracker, sequence: Sequence, dependencies: list[Grid]) -> tuple[Any, ...]:
         """Compute the analysis for a single sequence. The sequence must contain at
         least one anchor.
 
@@ -324,11 +336,13 @@ class EAOCurves(SeparableAnalysis):
         :param sequence: Sequence.
         :type sequence: Sequence
         :param dependencies: List of dependencies.
-        :type dependencies: List[Grid]
+        :type dependencies: list[Grid]
 
         :returns: Results of the analysis.
-        :rtype: Tuple[Any]"""
+        :rtype: tuple[Any, ...]"""
         
+        assert isinstance(experiment, MultiStartExperiment)
+
         results = experiment.results(tracker, sequence)
 
         forward, backward = find_anchors(sequence, experiment.anchor)
@@ -336,8 +350,8 @@ class EAOCurves(SeparableAnalysis):
         if len(forward) == 0 and len(backward) == 0:
             raise RuntimeError("Sequence does not contain any anchors")
 
-        overlaps_all = []
-        success_all = []
+        overlaps_all: list[list[float]] = []
+        success_all: list[bool] = []
 
         for i, reverse in [(f, False) for f in forward] + [(f, True) for f in backward]:
             name = "%s_%08d" % (sequence.name, i)
@@ -346,7 +360,7 @@ class EAOCurves(SeparableAnalysis):
                 raise MissingResultsException()
 
             if reverse:
-                proxy = FrameMapSequence(sequence, list(reversed(range(0, i + 1))))
+                proxy: Sequence = FrameMapSequence(sequence, list(reversed(range(0, i + 1))))
             else:
                 proxy = FrameMapSequence(sequence, list(range(i, len(sequence))))
 
@@ -354,13 +368,17 @@ class EAOCurves(SeparableAnalysis):
 
             masks = proxy.object(self.ignore_masks)
 
-            overlaps = calculate_overlaps(trajectory.regions(), proxy.groundtruth(), proxy.size if self.burnin else None, ignore=masks)
+            proxy_groundtruth = proxy.groundtruth()
+            assert proxy_groundtruth is not None, f"Missing groundtruth for proxy sequence {name}"
+
+            overlaps = calculate_overlaps(trajectory.regions(), proxy_groundtruth, proxy.size if self.bounded else None, ignore=masks)
 
             grace = self.grace
             progress = len(proxy)
 
             for j, overlap in enumerate(overlaps):
-                if overlap <= self.threshold and not proxy.groundtruth(j).is_empty():
+                gt_j = proxy.groundtruth(j)
+                if overlap <= self.threshold and gt_j is not None and not gt_j.is_empty():
                     grace = grace - 1
                     if grace == 0:
                         progress = j + 1 - self.grace  # subtract since we need actual point of the failure
@@ -368,14 +386,14 @@ class EAOCurves(SeparableAnalysis):
                 else:
                     grace = self.grace
 
-            success = True
+            succeeded = True
             if progress < len(overlaps):
                 # tracker has failed during this run
-                overlaps[progress:] = (len(overlaps) - progress) * [float(0)]
-                success = False
+                overlaps[progress:] = (len(overlaps) - progress) * [0.0]
+                succeeded = False
 
             overlaps_all.append(overlaps)
-            success_all.append(success)
+            success_all.append(succeeded)
 
         return compute_eao_partial(overlaps_all, success_all, self.high), 1
 
@@ -388,43 +406,43 @@ class EAOCurve(SequenceAggregator):
     """
 
     curves = Include(EAOCurves)
-    
+
     @property
-    def _title_default(self):
+    def _title_default(self) -> str:
         """Title of the analysis."""
         return "EAO Curve"
 
-    def describe(self):
+    def describe(self) -> tuple[Result | None, ...]:
         """Return the description of the analysis."""
         return Plot("Expected average overlap", "EAO", minimal=0, maximal=1, wrt="frames", trait="eao"),
 
-    def compatible(self, experiment: Experiment):
+    def compatible(self, experiment: Experiment) -> bool:
         """Check if the experiment is compatible with the analysis.
 
         The experiment must be a multistart experiment.
         """
         return isinstance(experiment, MultiStartExperiment)
 
-    def dependencies(self):
+    def dependencies(self) -> TSequence[Analysis]:
         """Return the dependencies of the analysis."""
-        return self.curves,
+        return (self.curves,)
 
-    def aggregate(self, tracker: Tracker, sequences: List[Sequence], results: Grid) -> Tuple[Any]:
+    def aggregate(self, tracker: Tracker, sequences: list[Sequence], results: Grid) -> tuple[Any, ...]:
         """Aggregate the results of the analysis for multiple sequences. The sequences
         must contain at least one anchor.
 
         :param tracker: Tracker.
         :type tracker: Tracker
         :param sequences: List of sequences.
-        :type sequences: List[Sequence]
+        :type sequences: list[Sequence]
         :param results: Grid of results.
         :type results: Grid
 
         :returns: Results of the analysis.
-        :rtype: Tuple[Any]"""
+        :rtype: tuple[Any, ...]"""
 
-        eao_curve = self.curves.high * [float(0)]
-        eao_weights = self.curves.high * [float(0)]
+        eao_curve = self.curves.high * [0.0]
+        eao_weights = self.curves.high * [0.0]
 
         for (seq_eao_curve, eao_active), seq_w in results:
             for i, (eao_, active_) in enumerate(zip(seq_eao_curve, eao_active)):
@@ -445,45 +463,45 @@ class EAOScore(Analysis):
     eaocurve = Include(EAOCurve)
 
     @property
-    def _title_default(self):
+    def _title_default(self) -> str:
         """Title of the analysis."""
         return "EAO analysis"
 
-    def describe(self):
+    def describe(self) -> tuple[Result | None, ...]:
         """Return the description of the analysis."""
         return Measure("Expected average overlap", "EAO", minimal=0, maximal=1, direction=Sorting.DESCENDING),
 
-    def compatible(self, experiment: Experiment):
+    def compatible(self, experiment: Experiment) -> bool:
         """Check if the experiment is compatible with the analysis.
 
         The experiment must be a multistart experiment.
         """
         return isinstance(experiment, MultiStartExperiment)
 
-    def dependencies(self):
+    def dependencies(self) -> TSequence[Analysis]:
         """Return the dependencies of the analysis."""
-        return self.eaocurve,
+        return (self.eaocurve,)
 
-    def compute(self, experiment: Experiment, trackers: List[Tracker], sequences: List[Sequence], dependencies: List[Grid]) -> Grid:
+    def compute(self, experiment: Experiment, trackers: list[Tracker], sequences: list[Sequence], dependencies: list[Grid]) -> Grid:
         """Compute the analysis for multiple sequences. The sequences must contain at
         least one anchor.
 
         :param experiment: Experiment.
         :type experiment: Experiment
         :param trackers: List of trackers.
-        :type trackers: List[Tracker]
+        :type trackers: list[Tracker]
         :param sequences: List of sequences.
-        :type sequences: List[Sequence]
+        :type sequences: list[Sequence]
         :param dependencies: List of dependencies.
-        :type dependencies: List[Grid]
+        :type dependencies: list[Grid]
 
         :returns: Grid of results.
         :rtype: Grid"""
 
-        return dependencies[0].foreach(lambda x, i, j: (float(np.mean(x[0][self.low:self.high + 1])), ) )
+        return dependencies[0].foreach(lambda x, i, j: (float(np.mean(x[0][self.low:self.high + 1])), ))
 
     @property
-    def axes(self):
+    def axes(self) -> Axes:
         """Return the axes of the analysis."""
         return Axes.TRACKERS
 
