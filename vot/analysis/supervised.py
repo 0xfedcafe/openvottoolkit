@@ -58,8 +58,14 @@ def compute_accuracy(trajectory: list[Region], sequence: Sequence, burnin: int =
         return float(np.mean(overlaps[mask])), int(np.sum(mask))
     return 0.0, 0
 
-def compute_eao_curve(overlaps: list[list[float]], weights: list[float], success: list[bool]) -> npt.NDArray:
+def compute_eao_curve(overlaps: list[list[float]], weights: list[float], success: list[bool], min_length: int = 0) -> npt.NDArray:
     """Computes EAO curve from a list of overlaps, weights and success flags.
+
+    The curve extends to at least ``min_length`` columns: failed runs are zero-padded
+    to any length by definition (their masked running mean becomes ``sum/N_s``), so a
+    curve no longer ends at the longest observed run. Without this, averaging a score
+    interval that outlives every run silently drops the small tail values and inflates
+    the score of frequently-failing trackers.
 
     :param overlaps: Per-run overlap sequences.
     :type overlaps: list[list[float]]
@@ -67,10 +73,13 @@ def compute_eao_curve(overlaps: list[list[float]], weights: list[float], success
     :type weights: list[float]
     :param success: Per-run flag, False if the tracker failed during the run.
     :type success: list[bool]
+    :param min_length: Minimum number of curve columns; columns where no run is active
+        (beyond every failed and successful run) are NaN.
+    :type min_length: int
 
     :returns: Expected average overlap at each frame.
     :rtype: npt.NDArray"""
-    max_length = max([len(el) for el in overlaps])
+    max_length = max(max([len(el) for el in overlaps]), min_length)
     total_runs = len(overlaps)
     
     overlaps_array = np.zeros((total_runs, max_length), dtype=np.float32)
@@ -89,8 +98,11 @@ def compute_eao_curve(overlaps: list[list[float]], weights: list[float], success
     overlaps_array_sum = overlaps_array.copy()
     for j in range(1, overlaps_array_sum.shape[1]):
         overlaps_array_sum[:, j] = np.mean(overlaps_array[:, 1:j+1], axis=1)
-    
-    return np.sum(weights_vector * overlaps_array_sum * mask_array, axis=0) / np.sum(mask_array * weights_vector, axis=0)
+
+    # Columns with no active run (a tracker that never failed, past its longest
+    # success) are 0/0 -> NaN: the definition removes all segments there.
+    with np.errstate(invalid='ignore'):
+        return np.sum(weights_vector * overlaps_array_sum * mask_array, axis=0) / np.sum(mask_array * weights_vector, axis=0)
     
 class AccuracyRobustness(SeparableAnalysis):
     """Accuracy-Robustness analysis.
@@ -338,7 +350,11 @@ class EAOCurve(TrackerSeparableAnalysis):
                     weights_all.append(1.0)
                     term_pos += 1
 
-        return compute_eao_curve(overlaps_all, weights_all, success_all),
+        # Extend the curve to the longest sequence so every tracker's curve spans the
+        # same domain: a score interval is then averaged over the same columns for
+        # every tracker, instead of ending at each tracker's longest run.
+        min_length = max(len(s) for s in sequence)
+        return compute_eao_curve(overlaps_all, weights_all, success_all, min_length),
 
 class EAOScore(Analysis):
     """Expected Average Overlap score analysis.
@@ -384,7 +400,9 @@ class EAOScore(Analysis):
 
         :returns: Expected average overlap.
         :rtype: Grid"""
-        return dependencies[0].foreach(lambda x, i, j: (float(np.mean(x[0][self.low:self.high + 1])), ))
+        # nanmean: NaN columns mean the definition removed all segments there
+        # (a never-failing tracker past its longest success).
+        return dependencies[0].foreach(lambda x, i, j: (float(np.nanmean(x[0][self.low:self.high + 1])), ))
 
     @property
     def axes(self) -> Axes:
