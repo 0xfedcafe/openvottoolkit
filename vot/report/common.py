@@ -1,5 +1,6 @@
 """Common functions for document generation."""
 import os
+import re
 import math
 from collections.abc import Iterator
 
@@ -223,15 +224,26 @@ class StackAnalysesTable(Report):
     """A document that produces plots for all analyses configures in stack
     experiments."""
 
+    experiments = String(default="", description="Regex; only matching experiment ids are "
+                         "included, and each table lands in its experiment's section "
+                         "instead of the merged Overview.")
+
     async def generate(self, experiments: list["Experiment"], trackers: list["Tracker"], sequences: list["Sequence"]) -> dict:
 
         from vot.report.common import extract_measures_table
+
+        if self.experiments:
+            experiments = [e for e in experiments if re.search(self.experiments, e.identifier)]
 
         results = dict()
 
         for experiment in experiments:
             analyses = experiment.compatible_analyses()
             results[experiment] = {a: r for a, r in zip(analyses, await self.process(analyses, experiment, trackers, sequences))}
+
+        if self.experiments:
+            return {experiment.identifier: [extract_measures_table(trackers, {experiment: result})]
+                    for experiment, result in results.items()}
 
         table = extract_measures_table(trackers, results)
 

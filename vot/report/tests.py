@@ -204,6 +204,47 @@ class TestFailureHeatmap(unittest.TestCase):
         self.assertIn("svg", buffer.getvalue()[:512].lower())
 
 
+class TestStackAnalysesTable(unittest.TestCase):
+    """Tests for the overview table report's ``experiments`` filter."""
+
+    class _Experiment:
+        def __init__(self, identifier):
+            self.identifier = identifier
+
+        def compatible_analyses(self):
+            return []
+
+    def _table(self, **kwargs):
+        from vot.report.common import StackAnalysesTable
+
+        class _Stubbed(StackAnalysesTable):
+            async def process(self, analyses, experiment, trackers, sequences):
+                return []
+
+        return _Stubbed(**kwargs)
+
+    def test_default_is_merged_overview(self):
+        """Without a filter all experiments merge into a single Overview table."""
+        import asyncio
+
+        experiments = [self._Experiment("baseline"), self._Experiment("size_study")]
+        result = asyncio.run(self._table().generate(experiments, [], []))
+
+        self.assertEqual(list(result.keys()), ["Overview"])
+        self.assertEqual(len(result["Overview"]), 1)
+
+    def test_experiments_filter_splits_into_sections(self):
+        """A filtered table lands in its experiment's own section, so one table
+        entry per experiment replaces the merged Overview."""
+        import asyncio
+
+        experiments = [self._Experiment("baseline"), self._Experiment("size_study")]
+        result = asyncio.run(self._table(experiments="^size_study$").generate(experiments, [], []))
+
+        self.assertEqual(list(result.keys()), ["size_study"])
+        self.assertEqual(len(result["size_study"]), 1)
+
+
 class _SpyExperiment:
     """An experiment stub that counts ``select`` / ``transform`` applications."""
 
