@@ -359,20 +359,23 @@ class Tests(unittest.TestCase):
         from vot.analysis.speed import compute_speed
 
         trajectory = Trajectory(70)
-        # init + 4 warmup live frames, ~60 skipped, then one late live frame.
+        # init + 5 warmup live frames, ~60 skipped, then one late live frame.
         trajectory.set(0, Special(SpecialCode.INITIALIZATION), {"time": 0.001})
-        for frame, time in [(1, 5.0), (2, 2.0), (3, 2.0), (4, 2.0)]:
+        for frame, time in [(1, 5.0), (2, 2.0), (3, 2.0), (4, 2.0), (5, 2.0)]:
             trajectory.set(frame, Rectangle(0, 0, 10, 10), {"time": time})
-        for frame in range(5, 64):
+        for frame in range(6, 64):
             trajectory.set(frame, Rectangle(0, 0, 10, 10), {"time": 0.0})
         trajectory.set(64, Rectangle(0, 0, 10, 10), {"time": 2.0})
 
         metrics, per_frame_fps = compute_speed(trajectory, skip_initial=5)
 
-        # The curve includes all six live frames at their real indices.
-        self.assertEqual([f for f, _ in per_frame_fps], [0, 1, 2, 3, 4, 64])
-        # ``skip_initial=5`` leaves only the late frame in the average; FPS = 1/2.
+        # The curve includes all seven live frames (init included) at their real indices.
+        self.assertEqual([f for f, _ in per_frame_fps], [0, 1, 2, 3, 4, 5, 64])
+        # The init frame never enters the average; ``skip_initial=5`` then drops the
+        # five warmup updates, leaving only the late frame: FPS = 1/2, consistent
+        # with the frame time (pooled, not a mean of inverses).
         self.assertAlmostEqual(metrics.fps, 0.5)
+        self.assertAlmostEqual(metrics.fps, 1000.0 / metrics.time_ms)
 
     def test_sequence_speed_merges_disjoint_trajectories_by_absolute_frame(self):
         """``SequenceSpeed.subcompute`` merges per-frame FPS samples across
@@ -551,3 +554,71 @@ class Tests(unittest.TestCase):
         result = score.compute(MagicMock(), [MagicMock()], [], [grid])
 
         self.assertAlmostEqual(result[0, 0][0], 0.5)
+
+    def test_compute_speed_pooled_fps_matches_frame_time(self):
+        """FPS is pooled (samples over total time), not a mean of per-frame
+        inverses, so ``fps == 1000 / time_ms`` holds and varying frame times do
+        not bias FPS upward."""
+        from vot.region import Rectangle
+        from vot.tracker.results import Trajectory
+        from vot.analysis.speed import compute_speed
+
+        trajectory = Trajectory(3)
+        for frame, time in enumerate([1.0, 0.5, 0.5]):
+            trajectory.set(frame, Rectangle(0, 0, 10, 10), {"time": time})
+
+        metrics, _ = compute_speed(trajectory, skip_initial=0)
+
+        self.assertAlmostEqual(metrics.fps, 3 / 2.0)          # mean of inverses would be 5/3
+        self.assertAlmostEqual(metrics.fps, 1000.0 / metrics.time_ms)
+
+    def test_compute_speed_excludes_reinitialization_frames(self):
+        """Every (re)initialization frame times model construction, not an
+        update, and stays out of the averages — not just the run's first few
+        samples. The per-frame curve still shows them."""
+        from vot.region import Rectangle, Special, SpecialCode
+        from vot.tracker.results import Trajectory
+        from vot.analysis.speed import compute_speed
+
+        trajectory = Trajectory(8)
+        trajectory.set(0, Special(SpecialCode.INITIALIZATION), {"time": 5.0})
+        for frame in range(1, 4):
+            trajectory.set(frame, Rectangle(0, 0, 10, 10), {"time": 0.5})
+        trajectory.set(4, Special(SpecialCode.INITIALIZATION), {"time": 5.0})
+        for frame in range(5, 8):
+            trajectory.set(frame, Rectangle(0, 0, 10, 10), {"time": 0.5})
+
+        metrics, per_frame_fps = compute_speed(trajectory, skip_initial=0)
+
+        self.assertAlmostEqual(metrics.fps, 2.0)
+        self.assertAlmostEqual(metrics.time_ms, 500.0)
+        self.assertEqual(metrics.frames, 6)
+        self.assertEqual([f for f, _ in per_frame_fps], list(range(8)))
+
+    def test_sequence_speed_ignores_runs_without_timings(self):
+        """A repetition with no usable timings carries no speed information and
+        must not dilute the per-sequence average toward zero."""
+        from unittest.mock import MagicMock
+
+        from vot.region import Rectangle
+        from vot.tracker.results import Trajectory
+        from vot.experiment.multirun import MultiRunExperiment
+        from vot.analysis.speed import SequenceSpeed
+
+        timed = Trajectory(4)
+        for frame in range(4):
+            timed.set(frame, Rectangle(0, 0, 10, 10), {"time": 0.5})
+        untimed = Trajectory(4)
+        for frame in range(4):
+            untimed.set(frame, Rectangle(0, 0, 10, 10))
+
+        experiment = MagicMock(spec=MultiRunExperiment)
+        experiment.gather.return_value = [timed, untimed]
+        sequence = MagicMock()
+        sequence.__len__ = lambda self: 4
+
+        analysis = SequenceSpeed(skip_initial=0)
+        average_fps, average_time_ms, _, _ = analysis.subcompute(experiment, MagicMock(), sequence, [])
+
+        self.assertAlmostEqual(average_fps, 2.0)
+        self.assertAlmostEqual(average_time_ms, 500.0)

@@ -103,17 +103,22 @@ def _per_frame_times(trajectory: Trajectory) -> list[tuple[int, float]]:
 def compute_speed(trajectory: Trajectory, skip_initial: int = 5) -> tuple[SpeedMetrics, list[tuple[int, float]]]:
     """Computes average FPS, average frame time and per-frame FPS for a single trajectory.
 
-    ``skip_initial`` is applied to the *average* only — the per-frame FPS curve preserves
-    every positive-time sample so the plot can show e.g. a sparse realtime run's real
-    invocations at their true frame indices. The skip is counted in surviving samples
-    (not raw frames) because warmup happens on the first few real invocations, and a
-    realtime run can have huge gaps between them.
+    The averages cover tracking updates only: (re)initialization frames time model
+    construction rather than an update, so every one of them is excluded (not just the
+    run's first few), and ``skip_initial`` further drops the leading update samples
+    (warmup). FPS is pooled — sample count over total time — so ``fps == 1000 / time_ms``
+    always holds. Both exclusions apply to the *average* only; the per-frame FPS curve
+    preserves every positive-time sample so the plot can show e.g. a sparse realtime
+    run's real invocations at their true frame indices. The skip is counted in surviving
+    samples (not raw frames) because warmup happens on the first few real invocations,
+    and a realtime run can have huge gaps between them.
 
     :param trajectory: The tracker trajectory to inspect.
-    :param skip_initial: Number of leading positive-time samples to discard before averaging. Defaults to 5.
+    :param skip_initial: Number of leading update samples to discard before averaging. Defaults to 5.
 
-    :returns: The averaged :class:`SpeedMetrics` and the per-frame FPS curve, a list of
-        ``(frame_index, fps)`` pairs (empty when no usable timings exist).
+    :returns: The averaged :class:`SpeedMetrics` (all zeros when no update samples exist)
+        and the per-frame FPS curve, a list of ``(frame_index, fps)`` pairs (empty when
+        no usable timings exist).
     :rtype: tuple[SpeedMetrics, list[tuple[int, float]]]
     """
     pairs = _per_frame_times(trajectory)
@@ -122,9 +127,14 @@ def compute_speed(trajectory: Trajectory, skip_initial: int = 5) -> tuple[SpeedM
 
     per_frame_fps = [(frame, 1.0 / elapsed) for frame, elapsed in pairs]
 
-    tail = pairs[skip_initial:] if len(pairs) > skip_initial else pairs
+    initializations = set(trajectory.markers()[0])
+    samples = [(frame, elapsed) for frame, elapsed in pairs if frame not in initializations]
+    if not samples:
+        return SpeedMetrics(), per_frame_fps
+
+    tail = samples[skip_initial:] if len(samples) > skip_initial else samples
     times_array = np.asarray([t for _, t in tail], dtype=float)
-    fps = float(np.mean(1.0 / times_array))
+    fps = float(len(tail) / np.sum(times_array))
     time_ms = float(np.mean(times_array) * 1000.0)
     return SpeedMetrics(fps, time_ms, len(tail)), per_frame_fps
 
@@ -138,7 +148,8 @@ class SequenceSpeed(SeparableAnalysis):
     """
 
     skip_initial = Integer(default=5, val_min=0,
-                           description="Number of leading frames excluded from the average (init / warmup).")
+                           description="Number of leading update samples excluded from the average (warmup); "
+                                       "initialization frames are always excluded.")
 
     @property
     def _title_default(self) -> str:
@@ -201,9 +212,12 @@ class SequenceSpeed(SeparableAnalysis):
             for frame, fps in curve:
                 merged.setdefault(frame, []).append(fps)
 
-        # Average across repetitions, weighting each run equally.
-        average_fps = sum(run.fps for run in runs) / len(runs)
-        average_time_ms = sum(run.time_ms for run in runs) / len(runs)
+        # Average across repetitions, weighting each run equally. A run without usable
+        # update timings carries no speed information — averaging it in as zero would
+        # silently dilute the estimate.
+        usable = [run for run in runs if run.frames > 0]
+        average_fps = sum(run.fps for run in usable) / len(usable) if usable else 0.0
+        average_time_ms = sum(run.time_ms for run in usable) / len(usable) if usable else 0.0
 
         per_frame_fps = sorted((frame, sum(values) / len(values)) for frame, values in merged.items())
 
