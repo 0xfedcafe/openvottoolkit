@@ -13,7 +13,7 @@ The column axis is derived per sequence in one of two ways (``axis`` option):
   * ``name`` -- a number captured from the sequence name with ``pattern``, e.g.
     ``_speedup_(\\d+)x_`` for the temporal sub-sampling experiment.
 
-Sequences mapping to the same column value are summed. Tracker categories come from
+Sequences mapping to the same column value are averaged. Tracker categories come from
 the ``meta_category`` field in the tracker registry (``category`` metadata key);
 trackers without one fall into an "Other" band.
 
@@ -32,6 +32,7 @@ from attributee import String, Integer, Boolean
 
 from vot.experiment import Experiment
 from vot.dataset import Sequence
+from vot.region import Rectangle
 from vot.tracker import Tracker
 from vot.report import SeparableReport, Plot as ReportPlot, VegaSpec, Coverage
 
@@ -45,11 +46,16 @@ _METRICS = [
 
 def _region_diagonal(region) -> float | None:
     """Bounding-box diagonal (px) of a region, or None for special/empty regions."""
-    try:
-        x1, y1, x2, y2 = region.bounds()
-    except Exception:
-        return None
-    w, h = float(x2 - x1), float(y2 - y1)
+    if isinstance(region, Rectangle):
+        # bounds() quantizes to whole pixels; at px-scale objects that rounding shifts
+        # the size axis, so use the float extents the groundtruth actually stores.
+        w, h = float(region.width), float(region.height)
+    else:
+        try:
+            x1, y1, x2, y2 = region.bounds()
+        except Exception:
+            return None
+        w, h = float(x2 - x1), float(y2 - y1)
     if w <= 0 and h <= 0:
         return None
     return math.hypot(w, h)
@@ -111,7 +117,7 @@ class FailureHeatmap(SeparableReport):
 
         if self.numeric:
             # Round to the displayed precision so it is the column *identity*: slices that
-            # land on the same size/factor share one column (their counts are summed),
+            # land on the same size/factor share one column (their counts are averaged),
             # keeping the matplotlib grid and the Vega spec in lock-step.
             value = round(float(raw), self.decimals)
             if self.decimals <= 0:
@@ -174,6 +180,12 @@ class FailureHeatmap(SeparableReport):
         column_keys = sorted(columns.keys())
         column_labels = [columns[k] for k in column_keys]
         col_index = {k: i for i, k in enumerate(column_keys)}
+        # Sequences sharing a column are averaged, not summed: columns merge unequal
+        # numbers of sequences, and a raw sum would scale with the population rather
+        # than the tracker's behaviour.
+        col_population = [0] * len(column_keys)
+        for sequence in kept_sequences:
+            col_population[col_index[seq_column[sequence.name]]] += 1
         categories = self._ordered_categories(trackers)
 
         items: list = []
@@ -194,6 +206,9 @@ class FailureHeatmap(SeparableReport):
                     if cell is None:
                         continue
                     row[col_index[seq_column[sequence.name]]] += float(cell[0])
+                for ci, population in enumerate(col_population):
+                    if population > 1:
+                        row[ci] /= population
 
             total = sum(sum(r) for r in grid.values())
             if metric == "crashes" and total == 0:
@@ -236,7 +251,7 @@ class FailureHeatmap(SeparableReport):
 
         bands = []
         last = len(categories) - 1
-        for i, (cat, _trackers) in enumerate(categories):
+        for i, (cat, band_trackers) in enumerate(categories):
             x_axis = None
             if i == last:
                 x_axis = {"labelAngle": 0, "title": self._axis_title(),
@@ -252,8 +267,13 @@ class FailureHeatmap(SeparableReport):
                 "transform": [{"filter": "datum.Category == '%s'" % cat.replace("'", "\\'")}],
                 "width": {"step": 35}, "height": {"step": 30},
                 "encoding": {
-                    "x": {"field": "Column", "type": "ordinal", "axis": x_axis},
+                    # Explicit sort arrays: Vega's default ordinal sort is lexicographic,
+                    # which scrambles numeric labels ('10' before '2') and orders trackers
+                    # differently from the matplotlib twin.
+                    "x": {"field": "Column", "type": "ordinal", "sort": list(column_labels),
+                          "axis": x_axis},
                     "y": {"field": "Tracker", "type": "nominal",
+                          "sort": [t.label for t in band_trackers],
                           "axis": {"title": None, "minExtent": 100, "maxExtent": 100}},
                 },
                 "layer": [
@@ -273,7 +293,7 @@ class FailureHeatmap(SeparableReport):
             "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
             "background": "white",
             "title": {"text": "Tracker %s" % metric_label,
-                      "subtitle": "Per-sequence count (darker is better / more stable)",
+                      "subtitle": "Mean count per sequence (darker is better / more stable)",
                       "fontSize": 18, "anchor": "start", "subtitleColor": "#666", "offset": 16},
             "config": {"axis": {"domain": False, "ticks": False, "labelFontSize": 11,
                                 "labelColor": "#555", "titleColor": "#888"},

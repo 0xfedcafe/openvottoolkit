@@ -119,6 +119,76 @@ class TestFailureHeatmap(unittest.TestCase):
         domain = spec["vconcat"][0]["layer"][0]["encoding"]["color"]["scale"]["domain"]
         self.assertEqual(domain, [0, 3])
 
+    def test_region_diagonal_uses_float_extents_for_rectangles(self):
+        """Rectangle diagonals come from the float width/height the groundtruth
+        stores; ``bounds()`` quantizes to whole pixels, which shifts the size
+        axis at px-scale objects (and can relabel heatmap columns)."""
+        import math
+        from vot.region import Rectangle, Special, SpecialCode
+        from vot.report.heatmap import _region_diagonal
+
+        # int-rounded bounds() would give hypot(4, 4) ~= 5.66 here
+        diagonal = _region_diagonal(Rectangle(0.6, 0.6, 4.8, 4.8))
+        assert diagonal is not None
+        self.assertAlmostEqual(diagonal, math.hypot(4.8, 4.8), places=4)
+        self.assertIsNone(_region_diagonal(Special(SpecialCode.UNKNOWN)))
+
+    def test_merged_columns_average_not_sum(self):
+        """Sequences sharing a column contribute their mean, not a raw sum — a
+        sum scales with the column population (e.g. 4 merged slices) rather than
+        tracker behaviour."""
+        import asyncio
+        from vot.report import VegaSpec
+        from vot.report.heatmap import FailureHeatmap
+
+        class _Grid:
+            def __init__(self, cells):
+                self._cells = cells
+
+            def __getitem__(self, key):
+                return (self._cells[key],)
+
+        class _Stubbed(FailureHeatmap):
+            async def _single_result(self, analysis, experiment, trackers, sequences):
+                if type(analysis).__name__ != "FailureCount":
+                    return None
+                return _Grid({(0, 0): 1.0, (0, 1): 3.0, (0, 2): 5.0})
+
+        class _Experiment:
+            identifier = "exp"
+
+            def gather(self, tracker, sequence):
+                return [object()]
+
+        report = _Stubbed(axis="name", pattern=r"_(\d+)x")
+        sequences = [_FakeSequence("a_1x"), _FakeSequence("b_1x"), _FakeSequence("c_2x")]
+        trackers = [_FakeTracker("t0", "T0", "Cat")]
+
+        items = asyncio.run(report.perexperiment(_Experiment(), trackers, sequences))
+
+        spec = next(item for item in items if isinstance(item, VegaSpec)).spec
+        cells = {value["Column"]: value["Value"] for value in spec["data"]["values"]}
+        self.assertEqual(cells["1"], 2.0)  # mean of 1 and 3, not the sum 4
+        self.assertEqual(cells["2"], 5.0)  # singleton column unchanged
+
+    def test_vega_spec_orders_axes_explicitly(self):
+        """The Vega spec pins both axis orders: numeric column order (the default
+        lexicographic ordinal sort renders '10' before '2') and the registry
+        tracker order of the matplotlib twin."""
+        from vot.report.heatmap import FailureHeatmap
+
+        report = FailureHeatmap()
+        beta = _FakeTracker("b", "Beta", "Cat")
+        alpha = _FakeTracker("a", "Alpha", "Cat")
+        labels = ["2", "3", "10"]
+        grid = {"b": [0.0, 0.0, 0.0], "a": [0.0, 0.0, 0.0]}
+
+        spec = report._vega_spec("id", "Failures", [("Cat", [beta, alpha])], labels, grid)
+
+        encoding = spec["vconcat"][0]["encoding"]
+        self.assertEqual(encoding["x"]["sort"], labels)
+        self.assertEqual(encoding["y"]["sort"], ["Beta", "Alpha"])
+
     def test_mpl_plot_saves_svg(self):
         """The matplotlib twin renders to SVG through the Plot interface."""
         import io
@@ -132,6 +202,47 @@ class TestFailureHeatmap(unittest.TestCase):
         buffer = io.StringIO()
         plot.save(buffer, "SVG")
         self.assertIn("svg", buffer.getvalue()[:512].lower())
+
+
+class TestStackAnalysesTable(unittest.TestCase):
+    """Tests for the overview table report's ``experiments`` filter."""
+
+    class _Experiment:
+        def __init__(self, identifier):
+            self.identifier = identifier
+
+        def compatible_analyses(self):
+            return []
+
+    def _table(self, **kwargs):
+        from vot.report.common import StackAnalysesTable
+
+        class _Stubbed(StackAnalysesTable):
+            async def process(self, analyses, experiment, trackers, sequences):
+                return []
+
+        return _Stubbed(**kwargs)
+
+    def test_default_is_merged_overview(self):
+        """Without a filter all experiments merge into a single Overview table."""
+        import asyncio
+
+        experiments = [self._Experiment("baseline"), self._Experiment("size_study")]
+        result = asyncio.run(self._table().generate(experiments, [], []))
+
+        self.assertEqual(list(result.keys()), ["Overview"])
+        self.assertEqual(len(result["Overview"]), 1)
+
+    def test_experiments_filter_splits_into_sections(self):
+        """A filtered table lands in its experiment's own section, so one table
+        entry per experiment replaces the merged Overview."""
+        import asyncio
+
+        experiments = [self._Experiment("baseline"), self._Experiment("size_study")]
+        result = asyncio.run(self._table(experiments="^size_study$").generate(experiments, [], []))
+
+        self.assertEqual(list(result.keys()), ["size_study"])
+        self.assertEqual(len(result["size_study"]), 1)
 
 
 class _SpyExperiment:

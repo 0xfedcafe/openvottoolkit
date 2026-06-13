@@ -58,7 +58,7 @@ class Tests(unittest.TestCase):
 
         captured: dict = {}
 
-        def fake_curve(overlaps, weights, success):
+        def fake_curve(overlaps, weights, success, min_length=0):
             captured["overlaps"] = overlaps
             captured["weights"] = weights
             captured["success"] = success
@@ -359,20 +359,23 @@ class Tests(unittest.TestCase):
         from vot.analysis.speed import compute_speed
 
         trajectory = Trajectory(70)
-        # init + 4 warmup live frames, ~60 skipped, then one late live frame.
+        # init + 5 warmup live frames, ~60 skipped, then one late live frame.
         trajectory.set(0, Special(SpecialCode.INITIALIZATION), {"time": 0.001})
-        for frame, time in [(1, 5.0), (2, 2.0), (3, 2.0), (4, 2.0)]:
+        for frame, time in [(1, 5.0), (2, 2.0), (3, 2.0), (4, 2.0), (5, 2.0)]:
             trajectory.set(frame, Rectangle(0, 0, 10, 10), {"time": time})
-        for frame in range(5, 64):
+        for frame in range(6, 64):
             trajectory.set(frame, Rectangle(0, 0, 10, 10), {"time": 0.0})
         trajectory.set(64, Rectangle(0, 0, 10, 10), {"time": 2.0})
 
         metrics, per_frame_fps = compute_speed(trajectory, skip_initial=5)
 
-        # The curve includes all six live frames at their real indices.
-        self.assertEqual([f for f, _ in per_frame_fps], [0, 1, 2, 3, 4, 64])
-        # ``skip_initial=5`` leaves only the late frame in the average; FPS = 1/2.
+        # The curve includes all seven live frames (init included) at their real indices.
+        self.assertEqual([f for f, _ in per_frame_fps], [0, 1, 2, 3, 4, 5, 64])
+        # The init frame never enters the average; ``skip_initial=5`` then drops the
+        # five warmup updates, leaving only the late frame: FPS = 1/2, consistent
+        # with the frame time (pooled, not a mean of inverses).
         self.assertAlmostEqual(metrics.fps, 0.5)
+        self.assertAlmostEqual(metrics.fps, 1000.0 / metrics.time_ms)
 
     def test_sequence_speed_merges_disjoint_trajectories_by_absolute_frame(self):
         """``SequenceSpeed.subcompute`` merges per-frame FPS samples across
@@ -463,3 +466,159 @@ class Tests(unittest.TestCase):
         # AR exp-decay uses (failures + crashes) — sanity check the value.
         expected_ar_x = math.exp(-((failures + crashes) / len(regions)) * analysis.sensitivity)
         self.assertAlmostEqual(ar[0], expected_ar_x, places=6)
+
+    def test_eao_curve_min_length_pads_failed_runs(self):
+        """``compute_eao_curve`` extends failed runs as ``sum/N_s`` (the VOT2015
+        zero-padding definition) out to ``min_length``. Without the extension the
+        curve ends at the longest run and a score window outliving every run is
+        silently truncated, inflating EAO of frequently-failing trackers."""
+        import numpy as np
+        from vot.analysis.supervised import compute_eao_curve
+
+        # one failed run: init frame + 32 tracked frames at overlap 0.8
+        curve = compute_eao_curve([[1.0] + [0.8] * 32], [1.0], [False], 51)
+
+        self.assertEqual(len(curve), 51)
+        self.assertAlmostEqual(float(curve[32]), 0.8, places=5)
+        self.assertAlmostEqual(float(curve[50]), 0.8 * 32 / 50, places=5)
+        # score over [20, 50]: 0.699 once the decay tail counts, not 0.8
+        self.assertAlmostEqual(float(np.nanmean(curve[20:51])), 0.6994, places=3)
+
+    def test_eao_curve_min_length_marks_undefined_columns_nan(self):
+        """Columns where no run is active (a never-failing tracker past its
+        longest success) are NaN — the definition removes all segments there —
+        and must not be silently zeroed."""
+        import numpy as np
+        from vot.analysis.supervised import compute_eao_curve
+
+        curve = compute_eao_curve([[1.0, 0.9, 0.9]], [1.0], [True], 10)
+
+        self.assertEqual(len(curve), 10)
+        self.assertTrue(np.all(np.isnan(curve[3:])))
+        self.assertAlmostEqual(float(np.nanmean(curve[0:10])), (1.0 + 0.9 + 0.9) / 3, places=5)
+
+    def test_eao_curve_default_min_length_preserves_behavior(self):
+        """Without ``min_length`` the curve is unchanged from the original
+        formulation (hand-checked values)."""
+        from vot.analysis.supervised import compute_eao_curve
+
+        curve = compute_eao_curve([[1, .5, .5, .5], [1, 0]], [1.0, 1.0], [True, False])
+
+        self.assertEqual(curve.tolist(), [1.0, 0.25, 0.25, 0.25])
+
+    def test_eao_curve_subcompute_extends_to_sequence_length(self):
+        """``EAOCurve`` spans the longest sequence, not the longest run, so a
+        score interval is averaged over the same columns for every tracker."""
+        from unittest.mock import MagicMock
+
+        from vot.region import Rectangle, Special, SpecialCode
+        from vot.experiment.multirun import SupervisedExperiment
+        from vot.analysis.supervised import EAOCurve
+
+        regions = [Special(SpecialCode.INITIALIZATION)]
+        regions += [Rectangle(0, 0, 10, 10) for _ in range(9)]
+        regions += [Special(SpecialCode.FAILURE)]
+        regions += [Special(SpecialCode.UNKNOWN) for _ in range(39)]
+        trajectory = self._make_trajectory(regions)
+        groundtruth = [Rectangle(0, 0, 10, 10) for _ in range(50)]
+
+        experiment = MagicMock(spec=SupervisedExperiment)
+        experiment.gather.return_value = [trajectory]
+
+        sequence = MagicMock()
+        sequence.groundtruth.return_value = groundtruth
+        sequence.name = "seq"
+        sequence.size = (100, 100)
+        sequence.__len__ = lambda self: 50
+
+        curve = EAOCurve().subcompute(experiment, MagicMock(), [sequence], [])[0]
+
+        self.assertEqual(len(curve), 50)
+        self.assertAlmostEqual(float(curve[9]), 1.0, places=5)
+        # failed run carries 9 perfect frames, zero-padded by definition
+        self.assertAlmostEqual(float(curve[49]), 9 / 49, places=5)
+
+    def test_eao_score_skips_undefined_columns(self):
+        """``EAOScore`` excludes NaN (undefined-by-definition) curve columns from
+        the window mean instead of poisoning it."""
+        from unittest.mock import MagicMock
+
+        import numpy as np
+
+        from vot.analysis.supervised import EAOScore
+        from vot.utilities.data import Grid
+
+        grid = Grid.scalar((np.array([0.5, 0.5, np.nan, np.nan]),))
+        score = EAOScore(low=0, high=3)
+
+        result = score.compute(MagicMock(), [MagicMock()], [], [grid])
+
+        self.assertAlmostEqual(result[0, 0][0], 0.5)
+
+    def test_compute_speed_pooled_fps_matches_frame_time(self):
+        """FPS is pooled (samples over total time), not a mean of per-frame
+        inverses, so ``fps == 1000 / time_ms`` holds and varying frame times do
+        not bias FPS upward."""
+        from vot.region import Rectangle
+        from vot.tracker.results import Trajectory
+        from vot.analysis.speed import compute_speed
+
+        trajectory = Trajectory(3)
+        for frame, time in enumerate([1.0, 0.5, 0.5]):
+            trajectory.set(frame, Rectangle(0, 0, 10, 10), {"time": time})
+
+        metrics, _ = compute_speed(trajectory, skip_initial=0)
+
+        self.assertAlmostEqual(metrics.fps, 3 / 2.0)          # mean of inverses would be 5/3
+        self.assertAlmostEqual(metrics.fps, 1000.0 / metrics.time_ms)
+
+    def test_compute_speed_excludes_reinitialization_frames(self):
+        """Every (re)initialization frame times model construction, not an
+        update, and stays out of the averages — not just the run's first few
+        samples. The per-frame curve still shows them."""
+        from vot.region import Rectangle, Special, SpecialCode
+        from vot.tracker.results import Trajectory
+        from vot.analysis.speed import compute_speed
+
+        trajectory = Trajectory(8)
+        trajectory.set(0, Special(SpecialCode.INITIALIZATION), {"time": 5.0})
+        for frame in range(1, 4):
+            trajectory.set(frame, Rectangle(0, 0, 10, 10), {"time": 0.5})
+        trajectory.set(4, Special(SpecialCode.INITIALIZATION), {"time": 5.0})
+        for frame in range(5, 8):
+            trajectory.set(frame, Rectangle(0, 0, 10, 10), {"time": 0.5})
+
+        metrics, per_frame_fps = compute_speed(trajectory, skip_initial=0)
+
+        self.assertAlmostEqual(metrics.fps, 2.0)
+        self.assertAlmostEqual(metrics.time_ms, 500.0)
+        self.assertEqual(metrics.frames, 6)
+        self.assertEqual([f for f, _ in per_frame_fps], list(range(8)))
+
+    def test_sequence_speed_ignores_runs_without_timings(self):
+        """A repetition with no usable timings carries no speed information and
+        must not dilute the per-sequence average toward zero."""
+        from unittest.mock import MagicMock
+
+        from vot.region import Rectangle
+        from vot.tracker.results import Trajectory
+        from vot.experiment.multirun import MultiRunExperiment
+        from vot.analysis.speed import SequenceSpeed
+
+        timed = Trajectory(4)
+        for frame in range(4):
+            timed.set(frame, Rectangle(0, 0, 10, 10), {"time": 0.5})
+        untimed = Trajectory(4)
+        for frame in range(4):
+            untimed.set(frame, Rectangle(0, 0, 10, 10))
+
+        experiment = MagicMock(spec=MultiRunExperiment)
+        experiment.gather.return_value = [timed, untimed]
+        sequence = MagicMock()
+        sequence.__len__ = lambda self: 4
+
+        analysis = SequenceSpeed(skip_initial=0)
+        average_fps, average_time_ms, _, _ = analysis.subcompute(experiment, MagicMock(), sequence, [])
+
+        self.assertAlmostEqual(average_fps, 2.0)
+        self.assertAlmostEqual(average_time_ms, 500.0)

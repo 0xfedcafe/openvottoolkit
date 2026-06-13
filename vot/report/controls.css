@@ -5,7 +5,8 @@
     position: fixed;
     top: 60px;
     right: 0;
-    z-index: 100;
+    /* Above embedded Vega views: vega-embed's actions button carries z-index 1000. */
+    z-index: 1001;
     width: 220px;
     max-height: calc(100vh - 80px);
     display: flex;
